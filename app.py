@@ -14,9 +14,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ============================================================
 
 st.set_page_config(
-    page_title="Inventory Duplicate Detection",
+    page_title="Inventory Duplicate Detector",
     page_icon="📦",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 
@@ -28,32 +29,46 @@ st.markdown(
     """
     <style>
     .main-title {
-        font-size: 34px;
-        font-weight: 700;
-        color: #1F2937;
-        margin-bottom: 5px;
+        font-size: 36px;
+        font-weight: 750;
+        color: #111827;
+        margin-bottom: 4px;
     }
 
     .subtitle {
         font-size: 16px;
         color: #6B7280;
-        margin-bottom: 25px;
+        margin-bottom: 24px;
     }
 
     .section-title {
         font-size: 22px;
-        font-weight: 650;
+        font-weight: 700;
         color: #111827;
-        margin-top: 25px;
-        margin-bottom: 10px;
+        margin-top: 28px;
+        margin-bottom: 12px;
     }
 
     .info-box {
         background-color: #F3F4F6;
         padding: 18px;
-        border-radius: 10px;
+        border-radius: 12px;
         border-left: 5px solid #2563EB;
-        margin-bottom: 20px;
+        margin-bottom: 22px;
+        color: #1F2937;
+    }
+
+    .method-box {
+        background-color: #F9FAFB;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #E5E7EB;
+        margin-bottom: 18px;
+    }
+
+    .small-text {
+        color: #6B7280;
+        font-size: 14px;
     }
     </style>
     """,
@@ -87,13 +102,15 @@ ABBREVIATION_DICTIONARY = {
     "ctrl": "control",
     "conn": "connector",
     "pwr": "power",
-    "cord": "cord",
     "sw": "switch",
     "swi": "switch",
+    "no": "number",
+    "qty": "quantity",
+    "matl": "material",
 }
 
 
-def normalize_abbreviations(text):
+def normalize_abbreviations(text: str) -> str:
     """
     Replace common inventory/material abbreviations with full terms.
     """
@@ -107,7 +124,7 @@ def normalize_abbreviations(text):
     return text
 
 
-def clean_text(text):
+def clean_text(text: str) -> str:
     """
     Clean inventory item description before NLP processing.
     """
@@ -117,7 +134,7 @@ def clean_text(text):
     text = str(text).lower()
     text = normalize_abbreviations(text)
 
-    # Normalize measurements and patterns
+    # Normalize common measurement patterns
     text = re.sub(r"(\bm\d+)\s*[xX*]\s*(\d+)", r"\1 x \2", text)
     text = re.sub(r"(\d+)\s*mm\b", r"\1 mm", text)
     text = re.sub(r"(\d+)\s*cm\b", r"\1 cm", text)
@@ -125,7 +142,7 @@ def clean_text(text):
     text = re.sub(r"(\d+)\s*v\b", r"\1 volt", text)
     text = re.sub(r"(\d+)\s*a\b", r"\1 ampere", text)
 
-    # Remove symbols
+    # Remove symbols and keep only letters, numbers, and spaces
     text = re.sub(r"[^a-z0-9\s]", " ", text)
 
     # Remove extra spaces
@@ -134,17 +151,23 @@ def clean_text(text):
     return text
 
 
-def get_matched_words(text1, text2):
+def get_matched_keywords(text1: str, text2: str) -> str:
     """
-    Find common words between two cleaned descriptions.
+    Find common useful keywords between two cleaned descriptions.
     """
     words1 = set(str(text1).split())
     words2 = set(str(text2).split())
 
-    matched = words1.intersection(words2)
+    stop_words = {
+        "and", "or", "the", "for", "with", "of", "to", "in", "on",
+        "a", "an", "item", "material"
+    }
 
-    # Remove very short words
-    matched = [word for word in matched if len(word) > 1]
+    matched = words1.intersection(words2)
+    matched = [
+        word for word in matched
+        if len(word) > 1 and word not in stop_words
+    ]
 
     return ", ".join(sorted(matched))
 
@@ -153,7 +176,7 @@ def get_matched_words(text1, text2):
 # FILE READING
 # ============================================================
 
-def read_uploaded_file(uploaded_file):
+def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     """
     Read CSV or Excel file.
     Supports comma, semicolon, tab, pipe separators and common encodings.
@@ -190,18 +213,18 @@ def read_uploaded_file(uploaded_file):
                         best_df = df
 
                 except Exception:
-                    pass
+                    continue
 
         if best_df is not None:
             return best_df
 
-        raise ValueError("Unable to read CSV file.")
+        raise ValueError("Unable to read CSV file. Please check the file format.")
 
     if filename.endswith(".xlsx") or filename.endswith(".xls"):
         uploaded_file.seek(0)
         return pd.read_excel(uploaded_file)
 
-    raise ValueError("Unsupported file type.")
+    raise ValueError("Unsupported file type. Please upload CSV or Excel.")
 
 
 # ============================================================
@@ -209,9 +232,6 @@ def read_uploaded_file(uploaded_file):
 # ============================================================
 
 def auto_select_code_column(columns):
-    """
-    Auto-select likely item code column.
-    """
     keywords = [
         "part_code",
         "item_code",
@@ -232,9 +252,6 @@ def auto_select_code_column(columns):
 
 
 def auto_select_description_column(columns):
-    """
-    Auto-select likely item description column.
-    """
     keywords = [
         "itm_desc",
         "description",
@@ -242,7 +259,8 @@ def auto_select_description_column(columns):
         "material_description",
         "internal",
         "external",
-        "part_name"
+        "part_name",
+        "name"
     ]
 
     lower_map = {col.lower(): col for col in columns}
@@ -255,31 +273,40 @@ def auto_select_description_column(columns):
 
 
 # ============================================================
-# DUPLICATE DETECTION
+# DUPLICATE DETECTION LOGIC
 # ============================================================
 
-def get_prediction(score, duplicate_threshold, possible_threshold):
+def get_result_label(score, duplicate_threshold, possible_threshold):
     """
-    Convert similarity score into duplicate label.
+    Convert similarity score into duplicate result.
     """
     if score >= duplicate_threshold:
-        return "Duplicate"
+        return "Likely Duplicate"
     elif score >= possible_threshold:
         return "Possible Duplicate"
-    else:
-        return "Not Duplicate"
+    return "Not Duplicate"
 
 
-def get_recommendation(prediction):
+def get_risk_level(result_label):
     """
-    Convert technical prediction into simple user action.
+    Convert duplicate result into user-friendly risk level.
     """
-    if prediction == "Duplicate":
-        return "Likely same item - review and merge if confirmed"
-    elif prediction == "Possible Duplicate":
-        return "Similar item - manual checking needed"
-    else:
-        return "Different item"
+    if result_label == "Likely Duplicate":
+        return "High"
+    elif result_label == "Possible Duplicate":
+        return "Medium"
+    return "Low"
+
+
+def get_recommendation(result_label):
+    """
+    Convert prediction into action recommendation.
+    """
+    if result_label == "Likely Duplicate":
+        return "High priority review. Merge or deactivate duplicate record if confirmed."
+    elif result_label == "Possible Duplicate":
+        return "Manual checking recommended before making changes."
+    return "No action required."
 
 
 def detect_duplicates(
@@ -293,15 +320,16 @@ def detect_duplicates(
     Detect duplicate inventory items by comparing one row description
     with another row description.
 
-    Item code is used only as identifier, not for similarity calculation.
+    Item code is used only as an identifier.
+    Similarity is calculated using the description text.
     """
     working_df = df.copy()
 
     working_df[description_column] = working_df[description_column].fillna("").astype(str)
-    working_df["cleaned_description"] = working_df[description_column].apply(clean_text)
+    working_df["Cleaned Description"] = working_df[description_column].apply(clean_text)
 
     working_df = working_df[
-        working_df["cleaned_description"].str.strip() != ""
+        working_df["Cleaned Description"].str.strip() != ""
     ].reset_index(drop=True)
 
     if len(working_df) < 2:
@@ -312,55 +340,54 @@ def detect_duplicates(
         ngram_range=(1, 2)
     )
 
-    tfidf_matrix = vectorizer.fit_transform(working_df["cleaned_description"])
+    tfidf_matrix = vectorizer.fit_transform(working_df["Cleaned Description"])
     similarity_matrix = cosine_similarity(tfidf_matrix)
 
-    results = []
+    records = []
 
     for i in range(len(working_df)):
         for j in range(i + 1, len(working_df)):
-            score = similarity_matrix[i][j]
+            score = float(similarity_matrix[i][j])
 
-            prediction = get_prediction(
+            result_label = get_result_label(
                 score,
                 duplicate_threshold,
                 possible_threshold
             )
 
-            if prediction == "Not Duplicate":
+            if result_label == "Not Duplicate":
                 continue
 
             item_code_1 = working_df.loc[i, code_column]
             item_code_2 = working_df.loc[j, code_column]
 
-            desc_1 = working_df.loc[i, description_column]
-            desc_2 = working_df.loc[j, description_column]
+            description_1 = working_df.loc[i, description_column]
+            description_2 = working_df.loc[j, description_column]
 
-            clean_1 = working_df.loc[i, "cleaned_description"]
-            clean_2 = working_df.loc[j, "cleaned_description"]
+            cleaned_1 = working_df.loc[i, "Cleaned Description"]
+            cleaned_2 = working_df.loc[j, "Cleaned Description"]
 
-            row = {
+            records.append({
                 "Item Code 1": item_code_1,
-                "Item Description 1": desc_1,
+                "Item Description 1": description_1,
                 "Item Code 2": item_code_2,
-                "Item Description 2": desc_2,
+                "Item Description 2": description_2,
                 "Similarity (%)": round(score * 100, 2),
-                "Result": prediction,
-                "Recommendation": get_recommendation(prediction),
-                "Matched Keywords": get_matched_words(clean_1, clean_2),
-                "Cleaned Description 1": clean_1,
-                "Cleaned Description 2": clean_2,
-            }
+                "Duplicate Status": result_label,
+                "Risk Level": get_risk_level(result_label),
+                "Recommended Action": get_recommendation(result_label),
+                "Matched Keywords": get_matched_keywords(cleaned_1, cleaned_2),
+                "Cleaned Description 1": cleaned_1,
+                "Cleaned Description 2": cleaned_2,
+            })
 
-            results.append(row)
-
-    result_df = pd.DataFrame(results)
+    result_df = pd.DataFrame(records)
 
     if result_df.empty:
         return working_df, result_df, result_df
 
-    # Remove repeated same item-code pair
-    result_df["pair_key"] = result_df.apply(
+    # Remove repeated pair based on item code combination
+    result_df["Pair Key"] = result_df.apply(
         lambda row: tuple(sorted([
             str(row["Item Code 1"]),
             str(row["Item Code 2"])
@@ -374,21 +401,20 @@ def detect_duplicates(
     )
 
     result_df = result_df.drop_duplicates(
-        subset=["pair_key"],
+        subset=["Pair Key"],
         keep="first"
-    )
+    ).drop(columns=["Pair Key"]).reset_index(drop=True)
 
-    result_df = result_df.drop(columns=["pair_key"]).reset_index(drop=True)
-
-    simple_result_df = result_df[
+    user_result_df = result_df[
         [
             "Item Code 1",
             "Item Description 1",
             "Item Code 2",
             "Item Description 2",
             "Similarity (%)",
-            "Result",
-            "Recommendation",
+            "Duplicate Status",
+            "Risk Level",
+            "Recommended Action",
             "Matched Keywords"
         ]
     ]
@@ -398,17 +424,17 @@ def detect_duplicates(
             "Item Code 1",
             "Item Code 2",
             "Similarity (%)",
-            "Result",
+            "Duplicate Status",
             "Cleaned Description 1",
             "Cleaned Description 2"
         ]
     ]
 
-    return working_df, simple_result_df, technical_result_df
+    return working_df, user_result_df, technical_result_df
 
 
 # ============================================================
-# DOWNLOAD FUNCTIONS
+# DOWNLOAD HELPERS
 # ============================================================
 
 def dataframe_to_csv(df):
@@ -419,7 +445,7 @@ def dataframe_to_excel(df):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Results")
+        df.to_excel(writer, index=False, sheet_name="Duplicate Results")
 
     return output.getvalue()
 
@@ -457,14 +483,15 @@ def create_sample_data():
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title("⚙️ Settings")
+st.sidebar.title("⚙️ Detection Settings")
 
 duplicate_threshold = st.sidebar.slider(
-    "Duplicate threshold",
+    "Likely duplicate threshold",
     min_value=0.50,
     max_value=1.00,
     value=0.80,
-    step=0.01
+    step=0.01,
+    help="Item pairs with similarity above this value are marked as Likely Duplicate."
 )
 
 possible_threshold = st.sidebar.slider(
@@ -472,22 +499,32 @@ possible_threshold = st.sidebar.slider(
     min_value=0.10,
     max_value=0.79,
     value=0.50,
-    step=0.01
+    step=0.01,
+    help="Item pairs with similarity above this value are marked as Possible Duplicate."
 )
 
 st.sidebar.markdown("---")
 
 st.sidebar.markdown(
     """
-    ### NLP Method
+    ### NLP Components
 
-    - Text preprocessing
-    - Abbreviation normalization
-    - TF-IDF vectorization
-    - Cosine similarity
-    - Threshold classification
+    **Text Preprocessing**  
+    Cleans item descriptions.
+
+    **Abbreviation Normalization**  
+    Converts short forms such as SS, PCB, BLK.
+
+    **TF-IDF Vectorization**  
+    Converts text into numerical features.
+
+    **Cosine Similarity**  
+    Measures similarity between item descriptions.
     """
 )
+
+if possible_threshold >= duplicate_threshold:
+    st.sidebar.error("Possible threshold must be lower than likely duplicate threshold.")
 
 
 # ============================================================
@@ -495,20 +532,21 @@ st.sidebar.markdown(
 # ============================================================
 
 st.markdown(
-    '<div class="main-title">📦 Duplicate Inventory Item Detection Using NLP</div>',
+    '<div class="main-title">📦 Inventory Duplicate Detector</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
-    '<div class="subtitle">Detect duplicate or similar inventory item descriptions using TF-IDF and Cosine Similarity.</div>',
+    '<div class="subtitle">NLP-based duplicate detection for inventory and material master item descriptions.</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
     """
     <div class="info-box">
-    This system compares one inventory item description with another item description.
-    The item code is used only as an identifier in the result table.
+    <b>Objective:</b> This application identifies inventory records that may refer to the same item,
+    even when their descriptions are written differently. The system compares item descriptions using
+    NLP techniques and highlights records that require manual review.
     </div>
     """,
     unsafe_allow_html=True
@@ -516,16 +554,16 @@ st.markdown(
 
 
 # ============================================================
-# UPLOAD DATA
+# UPLOAD SECTION
 # ============================================================
 
 st.markdown(
-    '<div class="section-title">1. Upload Inventory Dataset</div>',
+    '<div class="section-title">1. Upload Dataset</div>',
     unsafe_allow_html=True
 )
 
 uploaded_file = st.file_uploader(
-    "Upload CSV or Excel file",
+    "Upload inventory or material master file",
     type=["csv", "xlsx", "xls"]
 )
 
@@ -546,25 +584,29 @@ elif uploaded_file is not None:
 
 
 # ============================================================
-# PROCESS DATA
+# MAIN PROCESS
 # ============================================================
 
 if df is not None:
 
     st.markdown(
-        '<div class="section-title">2. Dataset Preview</div>',
+        '<div class="section-title">2. Dataset Overview</div>',
         unsafe_allow_html=True
     )
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Rows", len(df))
-    col2.metric("Total Columns", len(df.columns))
-    col3.metric("Method", "TF-IDF + Cosine")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Records", len(df))
+    c2.metric("Total Columns", len(df.columns))
+    c3.metric("Method", "TF-IDF + Cosine Similarity")
 
-    st.dataframe(df.head(30), use_container_width=True)
+    st.dataframe(
+        df.head(30),
+        use_container_width=True,
+        hide_index=True
+    )
 
     st.markdown(
-        '<div class="section-title">3. Select Columns</div>',
+        '<div class="section-title">3. Select Required Columns</div>',
         unsafe_allow_html=True
     )
 
@@ -573,30 +615,51 @@ if df is not None:
     default_code = auto_select_code_column(columns)
     default_desc = auto_select_description_column(columns)
 
-    code_column = st.selectbox(
-        "Select item code column",
-        options=columns,
-        index=columns.index(default_code)
-    )
+    col_a, col_b = st.columns(2)
 
-    description_column = st.selectbox(
-        "Select item description column",
-        options=columns,
-        index=columns.index(default_desc)
-    )
+    with col_a:
+        code_column = st.selectbox(
+            "Item code column",
+            options=columns,
+            index=columns.index(default_code)
+        )
+
+    with col_b:
+        description_column = st.selectbox(
+            "Item description column",
+            options=columns,
+            index=columns.index(default_desc)
+        )
 
     st.markdown(
-        '<div class="section-title">4. Run Detection</div>',
+        """
+        <div class="method-box">
+        <b>Detection logic:</b> The system compares the selected item description from one row
+        with the selected item description from another row. The item code is only used to identify
+        the records in the result.
+        </div>
+        """,
         unsafe_allow_html=True
     )
 
-    if st.button("🚀 Detect Duplicate Items", type="primary"):
+    st.markdown(
+        '<div class="section-title">4. Run Duplicate Detection</div>',
+        unsafe_allow_html=True
+    )
+
+    run_button = st.button(
+        "🚀 Run Duplicate Detection",
+        type="primary",
+        use_container_width=True
+    )
+
+    if run_button:
 
         if possible_threshold >= duplicate_threshold:
-            st.error("Possible duplicate threshold must be lower than duplicate threshold.")
+            st.error("Possible duplicate threshold must be lower than likely duplicate threshold.")
 
         else:
-            with st.spinner("Running NLP duplicate detection..."):
+            with st.spinner("Processing descriptions and calculating similarity..."):
                 cleaned_df, result_df, technical_result_df = detect_duplicates(
                     df=df,
                     code_column=code_column,
@@ -606,66 +669,75 @@ if df is not None:
                 )
 
             st.markdown(
-                '<div class="section-title">5. Cleaned Text Preview</div>',
-                unsafe_allow_html=True
-            )
-
-            st.dataframe(
-                cleaned_df[[code_column, description_column, "cleaned_description"]].head(50),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            st.markdown(
-                '<div class="section-title">6. Detection Summary</div>',
+                '<div class="section-title">5. Detection Summary</div>',
                 unsafe_allow_html=True
             )
 
             if result_df.empty:
-                st.warning("No duplicate or possible duplicate items detected. Try lowering the threshold.")
+                st.warning("No duplicate or possible duplicate records were found. Try lowering the threshold.")
 
             else:
-                duplicate_count = len(result_df[result_df["Result"] == "Duplicate"])
-                possible_count = len(result_df[result_df["Result"] == "Possible Duplicate"])
+                high_risk = len(result_df[result_df["Risk Level"] == "High"])
+                medium_risk = len(result_df[result_df["Risk Level"] == "Medium"])
 
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Duplicate", duplicate_count)
-                m2.metric("Possible Duplicate", possible_count)
-                m3.metric("Total Similar Pairs", len(result_df))
+                s1, s2, s3 = st.columns(3)
+                s1.metric("High Risk Matches", high_risk)
+                s2.metric("Medium Risk Matches", medium_risk)
+                s3.metric("Total Matches Found", len(result_df))
 
-                summary_df = result_df["Result"].value_counts().reset_index()
-                summary_df.columns = ["Result", "Count"]
+                summary_df = result_df["Duplicate Status"].value_counts().reset_index()
+                summary_df.columns = ["Duplicate Status", "Count"]
 
                 fig, ax = plt.subplots()
-                ax.bar(summary_df["Result"], summary_df["Count"])
-                ax.set_xlabel("Result")
-                ax.set_ylabel("Count")
+                ax.bar(summary_df["Duplicate Status"], summary_df["Count"])
+                ax.set_xlabel("Duplicate Status")
+                ax.set_ylabel("Number of Matches")
                 ax.set_title("Duplicate Detection Summary")
+                plt.xticks(rotation=15)
+
                 st.pyplot(fig)
 
                 st.markdown(
-                    '<div class="section-title">7. Detection Results</div>',
+                    '<div class="section-title">6. Review Potential Duplicate Records</div>',
                     unsafe_allow_html=True
                 )
 
                 st.info(
-                    "The table below shows item pairs that may be duplicates. "
-                    "Focus on the Similarity (%), Result, and Recommendation columns."
+                    "Review the records below. Start with High Risk matches because they are the most likely duplicates."
                 )
 
-                result_filter = st.selectbox(
-                    "Show result type",
-                    options=["All", "Duplicate", "Possible Duplicate"]
-                )
+                filter_col1, filter_col2 = st.columns(2)
+
+                with filter_col1:
+                    status_filter = st.selectbox(
+                        "Filter by duplicate status",
+                        options=["All"] + sorted(result_df["Duplicate Status"].unique().tolist())
+                    )
+
+                with filter_col2:
+                    risk_filter = st.selectbox(
+                        "Filter by risk level",
+                        options=["All"] + sorted(result_df["Risk Level"].unique().tolist())
+                    )
 
                 display_df = result_df.copy()
 
-                if result_filter != "All":
-                    display_df = display_df[display_df["Result"] == result_filter]
+                if status_filter != "All":
+                    display_df = display_df[
+                        display_df["Duplicate Status"] == status_filter
+                    ]
 
-                if len(display_df) > 0:
-                    top_limit = st.slider(
-                        "Number of results to display",
+                if risk_filter != "All":
+                    display_df = display_df[
+                        display_df["Risk Level"] == risk_filter
+                    ]
+
+                if len(display_df) == 0:
+                    st.warning("No records match the selected filter.")
+
+                else:
+                    display_limit = st.slider(
+                        "Number of records to display",
                         min_value=10,
                         max_value=max(10, min(500, len(display_df))),
                         value=min(50, len(display_df)),
@@ -673,18 +745,28 @@ if df is not None:
                     )
 
                     st.dataframe(
-                        display_df.head(top_limit),
+                        display_df.head(display_limit),
                         use_container_width=True,
                         hide_index=True
                     )
-                else:
-                    st.warning("No results for the selected filter.")
 
-                with st.expander("View technical NLP details"):
+                with st.expander("View cleaned text used by NLP model"):
                     st.write(
-                        "This section shows the cleaned text used by the NLP model. "
-                        "You can use this for your report or presentation explanation."
+                        "This table shows the cleaned descriptions after preprocessing. "
+                        "It is useful for explaining the NLP process in your report."
                     )
+
+                    st.dataframe(
+                        cleaned_df[[code_column, description_column, "Cleaned Description"]].head(100),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                with st.expander("View technical similarity results"):
+                    st.write(
+                        "This table shows the technical output used for model explanation."
+                    )
+
                     st.dataframe(
                         technical_result_df.head(100),
                         use_container_width=True,
@@ -692,70 +774,53 @@ if df is not None:
                     )
 
                 st.markdown(
-                    '<div class="section-title">8. Download Results</div>',
+                    '<div class="section-title">7. Download Results</div>',
                     unsafe_allow_html=True
                 )
 
-                c1, c2 = st.columns(2)
+                d1, d2 = st.columns(2)
 
-                with c1:
+                with d1:
                     st.download_button(
-                        label="📥 Download Simple Results CSV",
+                        label="📥 Download Review Results CSV",
                         data=dataframe_to_csv(result_df),
-                        file_name="inventory_duplicate_simple_results.csv",
-                        mime="text/csv"
+                        file_name="inventory_duplicate_review_results.csv",
+                        mime="text/csv",
+                        use_container_width=True
                     )
 
-                with c2:
+                with d2:
                     st.download_button(
-                        label="📥 Download Simple Results Excel",
+                        label="📥 Download Review Results Excel",
                         data=dataframe_to_excel(result_df),
-                        file_name="inventory_duplicate_simple_results.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        file_name="inventory_duplicate_review_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
                     )
-
-                with st.expander("Download technical NLP results"):
-                    c3, c4 = st.columns(2)
-
-                    with c3:
-                        st.download_button(
-                            label="📥 Download Technical CSV",
-                            data=dataframe_to_csv(technical_result_df),
-                            file_name="inventory_duplicate_technical_results.csv",
-                            mime="text/csv"
-                        )
-
-                    with c4:
-                        st.download_button(
-                            label="📥 Download Technical Excel",
-                            data=dataframe_to_excel(technical_result_df),
-                            file_name="inventory_duplicate_technical_results.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
 
                 st.markdown(
-                    '<div class="section-title">9. NLP Method Explanation</div>',
+                    '<div class="section-title">8. NLP Method Explanation</div>',
                     unsafe_allow_html=True
                 )
 
                 st.markdown(
                     """
-                    This system uses NLP to compare inventory item descriptions.
+                    This application uses a text similarity approach to detect potential duplicate inventory records.
 
-                    **How it works:**
+                    **Process flow:**
 
-                    1. The item description is cleaned.
-                    2. Common abbreviations are standardized.
-                    3. The cleaned text is converted into TF-IDF vectors.
-                    4. Cosine similarity compares one row with another row.
-                    5. The system labels the result as Duplicate or Possible Duplicate.
+                    1. **Text preprocessing** removes symbols, converts text to lowercase, and cleans spacing.
+                    2. **Abbreviation normalization** converts common short forms into standard words.
+                    3. **TF-IDF vectorization** transforms item descriptions into numerical text features.
+                    4. **Cosine similarity** compares one item description with another item description.
+                    5. **Threshold classification** labels the pair as Likely Duplicate or Possible Duplicate.
 
-                    **Important:** The item code is not used to calculate similarity. It is only used to show which two items may be duplicates.
+                    The item code is not used to calculate similarity. It is only used as a reference to identify the records.
                     """
                 )
 
 else:
-    st.info("Please upload a CSV/Excel file or use the sample dataset.")
+    st.info("Upload a CSV/Excel file or use the sample dataset to begin.")
 
     st.markdown(
         '<div class="section-title">Sample Dataset Format</div>',
@@ -763,10 +828,15 @@ else:
     )
 
     sample_df = create_sample_data()
-    st.dataframe(sample_df, use_container_width=True)
+
+    st.dataframe(
+        sample_df,
+        use_container_width=True,
+        hide_index=True
+    )
 
     st.download_button(
-        label="📥 Download Sample CSV",
+        label="📥 Download Sample Dataset",
         data=dataframe_to_csv(sample_df),
         file_name="sample_inventory_dataset.csv",
         mime="text/csv"
