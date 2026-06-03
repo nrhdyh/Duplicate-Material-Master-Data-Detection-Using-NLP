@@ -86,10 +86,17 @@ ABBREVIATION_DICTIONARY = {
     "mt": "meter",
     "ctrl": "control",
     "conn": "connector",
+    "pwr": "power",
+    "cord": "cord",
+    "sw": "switch",
+    "swi": "switch",
 }
 
 
 def normalize_abbreviations(text):
+    """
+    Replace common inventory/material abbreviations with full terms.
+    """
     for short_form, full_form in ABBREVIATION_DICTIONARY.items():
         text = re.sub(
             rf"\b{re.escape(short_form)}\b",
@@ -101,17 +108,22 @@ def normalize_abbreviations(text):
 
 
 def clean_text(text):
+    """
+    Clean inventory item description before NLP processing.
+    """
     if pd.isna(text):
         return ""
 
     text = str(text).lower()
     text = normalize_abbreviations(text)
 
-    # Normalize measurements
+    # Normalize measurements and patterns
     text = re.sub(r"(\bm\d+)\s*[xX*]\s*(\d+)", r"\1 x \2", text)
     text = re.sub(r"(\d+)\s*mm\b", r"\1 mm", text)
     text = re.sub(r"(\d+)\s*cm\b", r"\1 cm", text)
     text = re.sub(r"(\d+)\s*m\b", r"\1 meter", text)
+    text = re.sub(r"(\d+)\s*v\b", r"\1 volt", text)
+    text = re.sub(r"(\d+)\s*a\b", r"\1 ampere", text)
 
     # Remove symbols
     text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -122,11 +134,30 @@ def clean_text(text):
     return text
 
 
+def get_matched_words(text1, text2):
+    """
+    Find common words between two cleaned descriptions.
+    """
+    words1 = set(str(text1).split())
+    words2 = set(str(text2).split())
+
+    matched = words1.intersection(words2)
+
+    # Remove very short words
+    matched = [word for word in matched if len(word) > 1]
+
+    return ", ".join(sorted(matched))
+
+
 # ============================================================
 # FILE READING
 # ============================================================
 
 def read_uploaded_file(uploaded_file):
+    """
+    Read CSV or Excel file.
+    Supports comma, semicolon, tab, pipe separators and common encodings.
+    """
     filename = uploaded_file.name.lower()
 
     if filename.endswith(".csv"):
@@ -178,6 +209,9 @@ def read_uploaded_file(uploaded_file):
 # ============================================================
 
 def auto_select_code_column(columns):
+    """
+    Auto-select likely item code column.
+    """
     keywords = [
         "part_code",
         "item_code",
@@ -198,6 +232,9 @@ def auto_select_code_column(columns):
 
 
 def auto_select_description_column(columns):
+    """
+    Auto-select likely item description column.
+    """
     keywords = [
         "itm_desc",
         "description",
@@ -222,6 +259,9 @@ def auto_select_description_column(columns):
 # ============================================================
 
 def get_prediction(score, duplicate_threshold, possible_threshold):
+    """
+    Convert similarity score into duplicate label.
+    """
     if score >= duplicate_threshold:
         return "Duplicate"
     elif score >= possible_threshold:
@@ -230,7 +270,31 @@ def get_prediction(score, duplicate_threshold, possible_threshold):
         return "Not Duplicate"
 
 
-def detect_duplicates(df, code_column, description_column, duplicate_threshold, possible_threshold):
+def get_recommendation(prediction):
+    """
+    Convert technical prediction into simple user action.
+    """
+    if prediction == "Duplicate":
+        return "Likely same item - review and merge if confirmed"
+    elif prediction == "Possible Duplicate":
+        return "Similar item - manual checking needed"
+    else:
+        return "Different item"
+
+
+def detect_duplicates(
+    df,
+    code_column,
+    description_column,
+    duplicate_threshold,
+    possible_threshold
+):
+    """
+    Detect duplicate inventory items by comparing one row description
+    with another row description.
+
+    Item code is used only as identifier, not for similarity calculation.
+    """
     working_df = df.copy()
 
     working_df[description_column] = working_df[description_column].fillna("").astype(str)
@@ -241,7 +305,7 @@ def detect_duplicates(df, code_column, description_column, duplicate_threshold, 
     ].reset_index(drop=True)
 
     if len(working_df) < 2:
-        return working_df, pd.DataFrame()
+        return working_df, pd.DataFrame(), pd.DataFrame()
 
     vectorizer = TfidfVectorizer(
         analyzer="word",
@@ -266,28 +330,81 @@ def detect_duplicates(df, code_column, description_column, duplicate_threshold, 
             if prediction == "Not Duplicate":
                 continue
 
+            item_code_1 = working_df.loc[i, code_column]
+            item_code_2 = working_df.loc[j, code_column]
+
+            desc_1 = working_df.loc[i, description_column]
+            desc_2 = working_df.loc[j, description_column]
+
+            clean_1 = working_df.loc[i, "cleaned_description"]
+            clean_2 = working_df.loc[j, "cleaned_description"]
+
             row = {
-                "item_code_1": working_df.loc[i, code_column],
-                "item_code_2": working_df.loc[j, code_column],
-                "description_1": working_df.loc[i, description_column],
-                "description_2": working_df.loc[j, description_column],
-                "similarity_percentage": round(score * 100, 2),
-                "prediction": prediction,
-                "cleaned_description_1": working_df.loc[i, "cleaned_description"],
-                "cleaned_description_2": working_df.loc[j, "cleaned_description"],
+                "Item Code 1": item_code_1,
+                "Item Description 1": desc_1,
+                "Item Code 2": item_code_2,
+                "Item Description 2": desc_2,
+                "Similarity (%)": round(score * 100, 2),
+                "Result": prediction,
+                "Recommendation": get_recommendation(prediction),
+                "Matched Keywords": get_matched_words(clean_1, clean_2),
+                "Cleaned Description 1": clean_1,
+                "Cleaned Description 2": clean_2,
             }
 
             results.append(row)
 
     result_df = pd.DataFrame(results)
 
-    if not result_df.empty:
-        result_df = result_df.sort_values(
-            by="similarity_percentage",
-            ascending=False
-        ).reset_index(drop=True)
+    if result_df.empty:
+        return working_df, result_df, result_df
 
-    return working_df, result_df
+    # Remove repeated same item-code pair
+    result_df["pair_key"] = result_df.apply(
+        lambda row: tuple(sorted([
+            str(row["Item Code 1"]),
+            str(row["Item Code 2"])
+        ])),
+        axis=1
+    )
+
+    result_df = result_df.sort_values(
+        by="Similarity (%)",
+        ascending=False
+    )
+
+    result_df = result_df.drop_duplicates(
+        subset=["pair_key"],
+        keep="first"
+    )
+
+    result_df = result_df.drop(columns=["pair_key"]).reset_index(drop=True)
+
+    simple_result_df = result_df[
+        [
+            "Item Code 1",
+            "Item Description 1",
+            "Item Code 2",
+            "Item Description 2",
+            "Similarity (%)",
+            "Result",
+            "Recommendation",
+            "Matched Keywords"
+        ]
+    ]
+
+    technical_result_df = result_df[
+        [
+            "Item Code 1",
+            "Item Code 2",
+            "Similarity (%)",
+            "Result",
+            "Cleaned Description 1",
+            "Cleaned Description 2"
+        ]
+    ]
+
+    return working_df, simple_result_df, technical_result_df
 
 
 # ============================================================
@@ -480,7 +597,7 @@ if df is not None:
 
         else:
             with st.spinner("Running NLP duplicate detection..."):
-                cleaned_df, result_df = detect_duplicates(
+                cleaned_df, result_df, technical_result_df = detect_duplicates(
                     df=df,
                     code_column=code_column,
                     description_column=description_column,
@@ -495,7 +612,8 @@ if df is not None:
 
             st.dataframe(
                 cleaned_df[[code_column, description_column, "cleaned_description"]].head(50),
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True
             )
 
             st.markdown(
@@ -507,20 +625,20 @@ if df is not None:
                 st.warning("No duplicate or possible duplicate items detected. Try lowering the threshold.")
 
             else:
-                duplicate_count = len(result_df[result_df["prediction"] == "Duplicate"])
-                possible_count = len(result_df[result_df["prediction"] == "Possible Duplicate"])
+                duplicate_count = len(result_df[result_df["Result"] == "Duplicate"])
+                possible_count = len(result_df[result_df["Result"] == "Possible Duplicate"])
 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Duplicate", duplicate_count)
                 m2.metric("Possible Duplicate", possible_count)
                 m3.metric("Total Similar Pairs", len(result_df))
 
-                summary_df = result_df["prediction"].value_counts().reset_index()
-                summary_df.columns = ["Prediction", "Count"]
+                summary_df = result_df["Result"].value_counts().reset_index()
+                summary_df.columns = ["Result", "Count"]
 
                 fig, ax = plt.subplots()
-                ax.bar(summary_df["Prediction"], summary_df["Count"])
-                ax.set_xlabel("Prediction")
+                ax.bar(summary_df["Result"], summary_df["Count"])
+                ax.set_xlabel("Result")
                 ax.set_ylabel("Count")
                 ax.set_title("Duplicate Detection Summary")
                 st.pyplot(fig)
@@ -530,7 +648,48 @@ if df is not None:
                     unsafe_allow_html=True
                 )
 
-                st.dataframe(result_df, use_container_width=True)
+                st.info(
+                    "The table below shows item pairs that may be duplicates. "
+                    "Focus on the Similarity (%), Result, and Recommendation columns."
+                )
+
+                result_filter = st.selectbox(
+                    "Show result type",
+                    options=["All", "Duplicate", "Possible Duplicate"]
+                )
+
+                display_df = result_df.copy()
+
+                if result_filter != "All":
+                    display_df = display_df[display_df["Result"] == result_filter]
+
+                if len(display_df) > 0:
+                    top_limit = st.slider(
+                        "Number of results to display",
+                        min_value=10,
+                        max_value=max(10, min(500, len(display_df))),
+                        value=min(50, len(display_df)),
+                        step=10
+                    )
+
+                    st.dataframe(
+                        display_df.head(top_limit),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.warning("No results for the selected filter.")
+
+                with st.expander("View technical NLP details"):
+                    st.write(
+                        "This section shows the cleaned text used by the NLP model. "
+                        "You can use this for your report or presentation explanation."
+                    )
+                    st.dataframe(
+                        technical_result_df.head(100),
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
                 st.markdown(
                     '<div class="section-title">8. Download Results</div>',
@@ -541,19 +700,38 @@ if df is not None:
 
                 with c1:
                     st.download_button(
-                        label="📥 Download CSV",
+                        label="📥 Download Simple Results CSV",
                         data=dataframe_to_csv(result_df),
-                        file_name="inventory_duplicate_results.csv",
+                        file_name="inventory_duplicate_simple_results.csv",
                         mime="text/csv"
                     )
 
                 with c2:
                     st.download_button(
-                        label="📥 Download Excel",
+                        label="📥 Download Simple Results Excel",
                         data=dataframe_to_excel(result_df),
-                        file_name="inventory_duplicate_results.xlsx",
+                        file_name="inventory_duplicate_simple_results.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
+
+                with st.expander("Download technical NLP results"):
+                    c3, c4 = st.columns(2)
+
+                    with c3:
+                        st.download_button(
+                            label="📥 Download Technical CSV",
+                            data=dataframe_to_csv(technical_result_df),
+                            file_name="inventory_duplicate_technical_results.csv",
+                            mime="text/csv"
+                        )
+
+                    with c4:
+                        st.download_button(
+                            label="📥 Download Technical Excel",
+                            data=dataframe_to_excel(technical_result_df),
+                            file_name="inventory_duplicate_technical_results.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 
                 st.markdown(
                     '<div class="section-title">9. NLP Method Explanation</div>',
