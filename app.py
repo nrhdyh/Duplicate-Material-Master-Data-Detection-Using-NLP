@@ -107,14 +107,19 @@ ABBREVIATION_DICTIONARY = {
     "id": "inner diameter",
     "mtr": "meter",
     "mt": "meter",
+    "lg": "long",
+    "len": "length",
+    "thk": "thickness",
+    "plt": "plate",
     "ctrl": "control",
     "conn": "connector",
-    "fix": "fixing",
-    "stp": "stamping",
 }
 
 
 def normalize_abbreviations(text: str) -> str:
+    """
+    Replace common BOM abbreviations with standardized full terms.
+    """
     for short_form, full_form in ABBREVIATION_DICTIONARY.items():
         text = re.sub(
             rf"\b{re.escape(short_form)}\b",
@@ -126,21 +131,27 @@ def normalize_abbreviations(text: str) -> str:
 
 
 def normalize_measurements(text: str) -> str:
+    """
+    Normalize common BOM measurement patterns.
+    Examples:
+    M4x10 -> m4 x 10
+    10MM -> 10 mm
+    2M -> 2 meter
+    """
     text = text.lower()
 
-    # M4x10, M4 X 10, M4*10 -> m4 x 10
     text = re.sub(r"(\bm\d+)\s*[xX*]\s*(\d+)", r"\1 x \2", text)
-
-    # 10MM -> 10 mm
     text = re.sub(r"(\d+)\s*mm\b", r"\1 mm", text)
-
-    # 2M -> 2 meter
+    text = re.sub(r"(\d+)\s*cm\b", r"\1 cm", text)
     text = re.sub(r"(\d+)\s*m\b", r"\1 meter", text)
 
     return text
 
 
-def clean_bom_text(text: str) -> str:
+def clean_bom_description(text: str) -> str:
+    """
+    Full NLP preprocessing pipeline for BOM item descriptions.
+    """
     if pd.isna(text):
         return ""
 
@@ -148,18 +159,13 @@ def clean_bom_text(text: str) -> str:
     text = normalize_abbreviations(text)
     text = normalize_measurements(text)
 
-    # Keep letters and numbers only
+    # Remove special symbols
     text = re.sub(r"[^a-z0-9\s]", " ", text)
 
-    # Remove extra spaces
+    # Remove extra spacing
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
-
-
-def combine_text_columns(df: pd.DataFrame, selected_columns: list[str]) -> pd.Series:
-    combined = df[selected_columns].fillna("").astype(str).agg(" ".join, axis=1)
-    return combined
 
 
 # ============================================================
@@ -168,20 +174,19 @@ def combine_text_columns(df: pd.DataFrame, selected_columns: list[str]) -> pd.Se
 
 def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     """
-    Read CSV or Excel file.
-    Supports your code_data.csv format:
-    - semicolon separator
-    - quoted values
-    - latin1/cp1252 encoding
+    Read CSV or Excel file into DataFrame.
+    This function handles:
+    - CSV files with comma, semicolon, tab, or pipe separators
+    - Encoding problems
+    - Bad/messy rows
+    - Excel files
     """
     filename = uploaded_file.name.lower()
 
     if filename.endswith(".csv"):
-        separators = [";", ",", "\t", "|", None]
+        separators = [None, ",", ";", "\t", "|"]
         encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
 
-        best_df = None
-        best_score = -1
         last_error = None
 
         for encoding in encodings:
@@ -194,25 +199,15 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
                         sep=separator,
                         engine="python",
                         encoding=encoding,
-                        quotechar='"',
                         on_bad_lines="skip"
                     )
 
-                    if df.empty:
-                        continue
-
-                    # Choose the read result with the most columns and rows
-                    score = len(df.columns) * 1000 + len(df)
-
-                    if score > best_score:
-                        best_score = score
-                        best_df = df
+                    # Accept only if dataframe has data
+                    if not df.empty and len(df.columns) >= 1:
+                        return df
 
                 except Exception as error:
                     last_error = error
-
-        if best_df is not None:
-            return best_df
 
         raise ValueError(f"Unable to read CSV file. Last error: {last_error}")
 
@@ -224,49 +219,6 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
 
 
 # ============================================================
-# COLUMN AUTO-DETECTION
-# ============================================================
-
-def auto_select_code_column(columns: list[str]) -> str:
-    priority = ["part_code", "item_code", "code", "part_no", "item_no", "id"]
-
-    lower_map = {col.lower(): col for col in columns}
-
-    for col in priority:
-        if col in lower_map:
-            return lower_map[col]
-
-    return "No item code column"
-
-
-def auto_select_description_columns(columns: list[str]) -> list[str]:
-    priority = ["internal", "description", "item_description", "part_name", "external"]
-
-    lower_map = {col.lower(): col for col in columns}
-    selected = []
-
-    for col in priority:
-        if col in lower_map:
-            selected.append(lower_map[col])
-
-    if selected:
-        return selected
-
-    return columns[:1]
-
-
-def get_existing_columns(columns: list[str], wanted: list[str]) -> list[str]:
-    lower_map = {col.lower(): col for col in columns}
-    found = []
-
-    for col in wanted:
-        if col.lower() in lower_map:
-            found.append(lower_map[col.lower()])
-
-    return found
-
-
-# ============================================================
 # DUPLICATE DETECTION
 # ============================================================
 
@@ -275,6 +227,9 @@ def assign_duplicate_label(
     duplicate_threshold: float,
     possible_threshold: float
 ) -> str:
+    """
+    Assign duplicate category based on similarity score.
+    """
     if score >= duplicate_threshold:
         return "Duplicate"
     elif score >= possible_threshold:
@@ -282,28 +237,47 @@ def assign_duplicate_label(
     return "Not Duplicate"
 
 
+def validate_input_dataframe(
+    df: pd.DataFrame,
+    description_column: str
+) -> tuple[bool, str]:
+    """
+    Validate uploaded BOM dataset.
+    """
+    if df.empty:
+        return False, "The uploaded file is empty."
+
+    if description_column not in df.columns:
+        return False, "The selected description column does not exist."
+
+    if df[description_column].dropna().empty:
+        return False, "The selected description column does not contain valid text."
+
+    return True, "Dataset is valid."
+
+
 def detect_duplicate_bom_items(
     df: pd.DataFrame,
+    description_column: str,
     code_column: str | None,
-    description_columns: list[str],
-    block_columns: list[str],
     duplicate_threshold: float,
     possible_threshold: float,
-    top_n: int,
-    compare_within_same_block_only: bool
+    show_not_duplicate: bool
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Detect duplicate BOM item descriptions using:
+    1. Text preprocessing
+    2. TF-IDF vectorization
+    3. Cosine similarity
+    4. Threshold-based classification
+    """
 
     working_df = df.copy()
 
-    working_df["combined_description"] = combine_text_columns(
-        working_df,
-        description_columns
-    )
+    working_df[description_column] = working_df[description_column].fillna("").astype(str)
+    working_df["cleaned_description"] = working_df[description_column].apply(clean_bom_description)
 
-    working_df["cleaned_description"] = working_df["combined_description"].apply(
-        clean_bom_text
-    )
-
+    # Remove rows with empty cleaned descriptions
     working_df = working_df[
         working_df["cleaned_description"].str.strip() != ""
     ].reset_index(drop=True)
@@ -311,105 +285,68 @@ def detect_duplicate_bom_items(
     if len(working_df) < 2:
         return working_df, pd.DataFrame()
 
+    vectorizer = TfidfVectorizer(
+        analyzer="word",
+        ngram_range=(1, 2),
+        min_df=1
+    )
+
+    tfidf_matrix = vectorizer.fit_transform(working_df["cleaned_description"])
+    similarity_matrix = cosine_similarity(tfidf_matrix)
+
     results = []
 
-    if compare_within_same_block_only and block_columns:
-        grouped_data = working_df.groupby(block_columns, dropna=False)
-        groups = [(group_key, group_df.reset_index()) for group_key, group_df in grouped_data]
-    else:
-        groups = [("All Data", working_df.reset_index())]
+    for i in range(len(working_df)):
+        for j in range(i + 1, len(working_df)):
+            similarity_score = similarity_matrix[i][j]
 
-    for group_key, group_df in groups:
-        if len(group_df) < 2:
-            continue
+            predicted_label = assign_duplicate_label(
+                similarity_score,
+                duplicate_threshold,
+                possible_threshold
+            )
 
-        vectorizer = TfidfVectorizer(
-            analyzer="word",
-            ngram_range=(1, 2),
-            min_df=1
-        )
+            if not show_not_duplicate and predicted_label == "Not Duplicate":
+                continue
 
-        tfidf_matrix = vectorizer.fit_transform(group_df["cleaned_description"])
-        similarity_matrix = cosine_similarity(tfidf_matrix)
+            row = {
+                "item_1_row": i + 1,
+                "item_2_row": j + 1,
+                "description_1": working_df.loc[i, description_column],
+                "description_2": working_df.loc[j, description_column],
+                "cleaned_description_1": working_df.loc[i, "cleaned_description"],
+                "cleaned_description_2": working_df.loc[j, "cleaned_description"],
+                "similarity_score": round(similarity_score, 4),
+                "similarity_percentage": round(similarity_score * 100, 2),
+                "prediction": predicted_label
+            }
 
-        for i in range(len(group_df)):
-            similarity_scores = similarity_matrix[i]
+            if code_column:
+                row["item_code_1"] = working_df.loc[i, code_column]
+                row["item_code_2"] = working_df.loc[j, code_column]
 
-            candidate_indexes = similarity_scores.argsort()[::-1]
-
-            added_count = 0
-
-            for j in candidate_indexes:
-                if i == j:
-                    continue
-
-                original_i = int(group_df.loc[i, "index"])
-                original_j = int(group_df.loc[j, "index"])
-
-                # Avoid duplicate pair: A-B and B-A
-                if original_i >= original_j:
-                    continue
-
-                score = float(similarity_scores[j])
-
-                if score < possible_threshold:
-                    continue
-
-                prediction = assign_duplicate_label(
-                    score,
-                    duplicate_threshold,
-                    possible_threshold
-                )
-
-                row = {
-                    "row_1": original_i + 1,
-                    "row_2": original_j + 1,
-                    "description_1": working_df.loc[original_i, "combined_description"],
-                    "description_2": working_df.loc[original_j, "combined_description"],
-                    "cleaned_description_1": working_df.loc[original_i, "cleaned_description"],
-                    "cleaned_description_2": working_df.loc[original_j, "cleaned_description"],
-                    "similarity_percentage": round(score * 100, 2),
-                    "prediction": prediction,
-                }
-
-                if code_column:
-                    row["item_code_1"] = working_df.loc[original_i, code_column]
-                    row["item_code_2"] = working_df.loc[original_j, code_column]
-
-                for block_col in block_columns:
-                    row[block_col] = working_df.loc[original_i, block_col]
-
-                results.append(row)
-
-                added_count += 1
-
-                if added_count >= top_n:
-                    break
+            results.append(row)
 
     result_df = pd.DataFrame(results)
 
     if not result_df.empty:
-        front_columns = []
+        preferred_columns = []
 
         if code_column:
-            front_columns.extend(["item_code_1", "item_code_2"])
+            preferred_columns.extend(["item_code_1", "item_code_2"])
         else:
-            front_columns.extend(["row_1", "row_2"])
+            preferred_columns.extend(["item_1_row", "item_2_row"])
 
-        front_columns.extend([
+        preferred_columns.extend([
             "description_1",
             "description_2",
             "similarity_percentage",
             "prediction",
+            "cleaned_description_1",
+            "cleaned_description_2",
         ])
 
-        extra_columns = [
-            col for col in result_df.columns
-            if col not in front_columns
-        ]
-
-        result_df = result_df[front_columns + extra_columns]
-        result_df = result_df.drop_duplicates()
+        result_df = result_df[preferred_columns]
         result_df = result_df.sort_values(
             by="similarity_percentage",
             ascending=False
@@ -423,10 +360,16 @@ def detect_duplicate_bom_items(
 # ============================================================
 
 def dataframe_to_csv(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8-sig")
+    """
+    Convert DataFrame to downloadable CSV.
+    """
+    return df.to_csv(index=False).encode("utf-8")
 
 
 def dataframe_to_excel(df: pd.DataFrame, sheet_name: str = "Results") -> bytes:
+    """
+    Convert DataFrame to downloadable Excel file.
+    """
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -436,35 +379,42 @@ def dataframe_to_excel(df: pd.DataFrame, sheet_name: str = "Results") -> bytes:
 
 
 # ============================================================
-# SAMPLE DATA
+# SAMPLE DATASET
 # ============================================================
 
 def create_sample_bom_data() -> pd.DataFrame:
+    """
+    Create sample BOM dataset for testing.
+    """
     return pd.DataFrame({
-        "part_code": [
+        "item_code": [
             "BOM001", "BOM002", "BOM003", "BOM004", "BOM005",
-            "BOM006", "BOM007", "BOM008", "BOM009", "BOM010"
+            "BOM006", "BOM007", "BOM008", "BOM009", "BOM010",
+            "BOM011", "BOM012", "BOM013", "BOM014", "BOM015",
+            "BOM016", "BOM017", "BOM018", "BOM019", "BOM020"
         ],
-        "internal": [
+        "description": [
             "Screw M4 x 10mm stainless steel",
             "SS screw M4 10mm",
+            "Screw M5 x 20mm stainless steel",
+            "Stainless steel screw M5 20mm",
             "Rubber gasket black 20mm",
             "Black rubber seal 20 mm",
             "PCB controller board",
             "Main control PCB board",
             "Steel bracket L shape",
             "L-shaped steel mounting bracket",
+            "Aluminium plate 100mm x 50mm",
+            "Alum plt 100 mm x 50 mm",
+            "Hex bolt M6 x 30mm",
+            "Bolt hexagon M6 30 mm",
+            "Plastic cover white",
+            "White plastic casing cover",
             "Cable black 2 meter",
-            "Cable blk 2m"
-        ],
-        "category": [
-            "Fastener", "Fastener", "Seal", "Seal", "Electronic",
-            "Electronic", "Metal Part", "Metal Part", "Cable", "Cable"
-        ],
-        "type": [
-            "Screw", "Screw", "Rubber", "Rubber", "PCB",
-            "PCB", "Bracket", "Bracket", "Cable", "Cable"
-        ],
+            "Cable blk 2m",
+            "Sensor temperature module",
+            "Temperature sensor module"
+        ]
     })
 
 
@@ -480,36 +430,36 @@ duplicate_threshold = st.sidebar.slider(
     "Duplicate threshold",
     min_value=0.50,
     max_value=1.00,
-    value=0.85,
-    step=0.01
+    value=0.80,
+    step=0.01,
+    help="Descriptions with similarity equal or above this value will be classified as Duplicate."
 )
 
 possible_threshold = st.sidebar.slider(
     "Possible duplicate threshold",
     min_value=0.10,
-    max_value=0.84,
-    value=0.60,
-    step=0.01
+    max_value=0.79,
+    value=0.50,
+    step=0.01,
+    help="Descriptions with similarity equal or above this value will be classified as Possible Duplicate."
 )
 
-top_n = st.sidebar.slider(
-    "Maximum similar matches per item",
-    min_value=1,
-    max_value=20,
-    value=5,
-    step=1
+show_not_duplicate = st.sidebar.checkbox(
+    "Show Not Duplicate pairs",
+    value=False,
+    help="Enable this only for testing because it may produce many rows."
 )
 
 st.sidebar.markdown("---")
 
 st.sidebar.markdown(
     """
-    ### NLP Components
+    ### NLP Method Used
 
-    - Text cleaning
-    - Abbreviation normalization
-    - TF-IDF vectorization
-    - Cosine similarity
+    - Text preprocessing  
+    - Abbreviation normalization  
+    - TF-IDF vectorization  
+    - Cosine similarity  
     - Threshold-based classification
     """
 )
@@ -528,15 +478,15 @@ st.markdown(
 )
 
 st.markdown(
-    '<div class="subtitle">Compare one BOM row with another BOM row using item descriptions, TF-IDF, and Cosine Similarity.</div>',
+    '<div class="subtitle">Detect duplicate or similar Bill of Materials item descriptions using TF-IDF and Cosine Similarity.</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
     """
     <div class="info-box">
-    <b>How detection works:</b> The system compares <b>one row description</b> with
-    <b>another row description</b>. The item code is used only as an identifier in the output.
+    <b>Purpose:</b> This system helps detect duplicate BOM item descriptions that may be written differently,
+    such as <i>"SS screw M4 10mm"</i> and <i>"Screw M4 x 10mm stainless steel"</i>.
     </div>
     """,
     unsafe_allow_html=True
@@ -553,7 +503,7 @@ st.markdown(
 )
 
 uploaded_file = st.file_uploader(
-    "Upload BOM file in CSV or Excel format",
+    "Upload your BOM file in CSV or Excel format",
     type=["csv", "xlsx", "xls"]
 )
 
@@ -587,7 +537,7 @@ if df is not None:
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Rows", len(df))
     col2.metric("Total Columns", len(df.columns))
-    col3.metric("Detection Method", "TF-IDF + Cosine")
+    col3.metric("Method", "TF-IDF + Cosine")
 
     st.dataframe(df.head(30), use_container_width=True)
 
@@ -598,45 +548,41 @@ if df is not None:
 
     all_columns = df.columns.tolist()
 
-    default_code = auto_select_code_column(all_columns)
-    default_description_columns = auto_select_description_columns(all_columns)
-
-    code_options = ["No item code column"] + all_columns
-
     selected_code_column = st.selectbox(
         "Select item code column",
-        options=code_options,
-        index=code_options.index(default_code) if default_code in code_options else 0
+        options=["No item code column"] + all_columns
     )
 
-    selected_description_columns = st.multiselect(
-        "Select description column(s) used for NLP comparison",
-        options=all_columns,
-        default=default_description_columns,
-        help="For your code_data.csv, recommended: part_code, internal, external. If external has many blanks, use part_code + internal."
-    )
-
-    recommended_block_columns = get_existing_columns(
-        all_columns,
-        ["category", "type", "class", "process"]
-    )
-
-    selected_block_columns = st.multiselect(
-        "Optional: compare only within same group/category",
-        options=all_columns,
-        default=get_existing_columns(all_columns, ["category", "type"]),
-        help="This reduces wrong matches. For your file, category/type is useful."
-    )
-
-    compare_within_same_block_only = st.checkbox(
-        "Only compare rows inside the same selected group/category",
-        value=True
+    selected_description_column = st.selectbox(
+        "Select BOM description column",
+        options=all_columns
     )
 
     code_column = None if selected_code_column == "No item code column" else selected_code_column
 
-    if not selected_description_columns:
-        st.warning("Please select at least one description column.")
+    is_valid, validation_message = validate_input_dataframe(
+        df,
+        selected_description_column
+    )
+
+    if is_valid:
+        st.markdown(
+            f"""
+            <div class="success-box">
+            <b>Validation:</b> {validation_message}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="warning-box">
+            <b>Validation:</b> {validation_message}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
     st.markdown(
         '<div class="section-title">4. Run Duplicate Detection</div>',
@@ -651,22 +597,24 @@ if df is not None:
     if run_detection:
 
         if possible_threshold >= duplicate_threshold:
-            st.error("Possible duplicate threshold must be lower than duplicate threshold.")
+            st.error(
+                "Please adjust the thresholds. Possible duplicate threshold must be lower than duplicate threshold."
+            )
 
-        elif not selected_description_columns:
-            st.error("Please select at least one description column.")
+        elif not is_valid:
+            st.error(validation_message)
 
         else:
-            with st.spinner("Running NLP duplicate detection..."):
+            with st.spinner(
+                "Cleaning descriptions, creating TF-IDF vectors, and calculating similarity..."
+            ):
                 cleaned_df, result_df = detect_duplicate_bom_items(
                     df=df,
+                    description_column=selected_description_column,
                     code_column=code_column,
-                    description_columns=selected_description_columns,
-                    block_columns=selected_block_columns,
                     duplicate_threshold=duplicate_threshold,
                     possible_threshold=possible_threshold,
-                    top_n=top_n,
-                    compare_within_same_block_only=compare_within_same_block_only
+                    show_not_duplicate=show_not_duplicate
                 )
 
             st.markdown(
@@ -675,9 +623,7 @@ if df is not None:
             )
 
             st.dataframe(
-                cleaned_df[
-                    selected_description_columns + ["combined_description", "cleaned_description"]
-                ].head(50),
+                cleaned_df[[selected_description_column, "cleaned_description"]],
                 use_container_width=True
             )
 
@@ -687,25 +633,39 @@ if df is not None:
             )
 
             if result_df.empty:
-                st.warning("No duplicate or possible duplicate items found. Try lowering the threshold.")
+                st.warning(
+                    "No duplicate or possible duplicate BOM items were detected. Try lowering the threshold."
+                )
             else:
-                duplicate_count = len(result_df[result_df["prediction"] == "Duplicate"])
-                possible_count = len(result_df[result_df["prediction"] == "Possible Duplicate"])
+                duplicate_count = len(
+                    result_df[result_df["prediction"] == "Duplicate"]
+                )
 
-                m1, m2, m3 = st.columns(3)
+                possible_count = len(
+                    result_df[result_df["prediction"] == "Possible Duplicate"]
+                )
+
+                not_duplicate_count = len(
+                    result_df[result_df["prediction"] == "Not Duplicate"]
+                )
+
+                m1, m2, m3, m4 = st.columns(4)
+
                 m1.metric("Duplicate", duplicate_count)
                 m2.metric("Possible Duplicate", possible_count)
-                m3.metric("Total Similar Pairs", len(result_df))
+                m3.metric("Not Duplicate", not_duplicate_count)
+                m4.metric("Total Compared Pairs", len(result_df))
 
                 summary_df = result_df["prediction"].value_counts().reset_index()
                 summary_df.columns = ["Prediction", "Count"]
 
                 fig, ax = plt.subplots()
                 ax.bar(summary_df["Prediction"], summary_df["Count"])
-                ax.set_xlabel("Prediction")
-                ax.set_ylabel("Number of Pairs")
-                ax.set_title("Duplicate Detection Summary")
-                plt.xticks(rotation=15)
+                ax.set_xlabel("Prediction Category")
+                ax.set_ylabel("Number of Item Pairs")
+                ax.set_title("BOM Duplicate Detection Summary")
+                plt.xticks(rotation=20)
+
                 st.pyplot(fig)
 
                 st.markdown(
@@ -714,7 +674,7 @@ if df is not None:
                 )
 
                 filter_option = st.selectbox(
-                    "Filter by prediction",
+                    "Filter result by prediction",
                     options=["All"] + sorted(result_df["prediction"].unique().tolist())
                 )
 
@@ -732,49 +692,50 @@ if df is not None:
                     unsafe_allow_html=True
                 )
 
-                c1, c2 = st.columns(2)
+                download_col1, download_col2 = st.columns(2)
 
-                with c1:
+                with download_col1:
                     st.download_button(
-                        label="📥 Download CSV",
+                        label="📥 Download Results as CSV",
                         data=dataframe_to_csv(filtered_result_df),
-                        file_name="bom_duplicate_results.csv",
+                        file_name="bom_duplicate_detection_results.csv",
                         mime="text/csv"
                     )
 
-                with c2:
+                with download_col2:
                     st.download_button(
-                        label="📥 Download Excel",
-                        data=dataframe_to_excel(filtered_result_df),
-                        file_name="bom_duplicate_results.xlsx",
+                        label="📥 Download Results as Excel",
+                        data=dataframe_to_excel(
+                            filtered_result_df,
+                            "Duplicate Results"
+                        ),
+                        file_name="bom_duplicate_detection_results.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
 
                 st.markdown(
-                    '<div class="section-title">9. Method Explanation</div>',
+                    '<div class="section-title">9. NLP Method Explanation</div>',
                     unsafe_allow_html=True
                 )
 
                 st.markdown(
                     """
-                    **How the system detects duplicates:**
+                    This system uses the following NLP workflow:
 
-                    The system does **not** detect duplicates using item code directly.  
-                    It compares the selected text description columns from one row with another row.
+                    1. **Text Preprocessing**  
+                       Converts BOM descriptions into lowercase, removes symbols, and cleans extra spacing.
 
-                    Example for your dataset:
+                    2. **Abbreviation Normalization**  
+                       Converts common BOM abbreviations such as `SS`, `PCB`, `BLK`, and `BRKT` into standard words.
 
-                    - `part_code` is used as the item identifier
-                    - `internal` / `external` are used as description text
-                    - `category` / `type` can be used to limit comparison within the same group
+                    3. **TF-IDF Vectorization**  
+                       Converts cleaned BOM text into numerical vectors based on word importance.
 
-                    NLP workflow:
+                    4. **Cosine Similarity**  
+                       Measures how similar two BOM item descriptions are.
 
-                    1. Combine selected description columns  
-                    2. Clean and normalize the text  
-                    3. Convert text into TF-IDF vectors  
-                    4. Compare row-to-row similarity using Cosine Similarity  
-                    5. Classify the pair as Duplicate or Possible Duplicate
+                    5. **Threshold-Based Classification**  
+                       Classifies item pairs as `Duplicate`, `Possible Duplicate`, or `Not Duplicate`.
                     """
                 )
 
@@ -782,23 +743,22 @@ else:
     st.markdown(
         """
         <div class="warning-box">
-        Please upload a CSV or Excel BOM file, or use the sample dataset.
+        Please upload a CSV or Excel BOM file, or select the sample dataset option.
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    sample_df = create_sample_bom_data()
-
     st.markdown(
-        '<div class="section-title">Sample Dataset Format</div>',
+        '<div class="section-title">Sample BOM Dataset Format</div>',
         unsafe_allow_html=True
     )
 
+    sample_df = create_sample_bom_data()
     st.dataframe(sample_df, use_container_width=True)
 
     st.download_button(
-        label="📥 Download Sample CSV",
+        label="📥 Download Sample BOM CSV",
         data=dataframe_to_csv(sample_df),
         file_name="sample_bom_dataset.csv",
         mime="text/csv"
