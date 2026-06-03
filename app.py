@@ -5,6 +5,10 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import wordpunct_tokenize
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
@@ -20,6 +24,22 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+
+# ============================================================
+# NLTK SETUP
+# ============================================================
+
+@st.cache_resource
+def setup_nltk():
+    try:
+        nltk.data.find("corpora/stopwords")
+    except LookupError:
+        nltk.download("stopwords")
+    return True
+
+
+setup_nltk()
 
 
 # ============================================================
@@ -132,7 +152,6 @@ ABBREVIATION_DICTIONARY = {
     "qty": "quantity",
     "matl": "material",
     "temp": "temperature",
-    "assy": "assembly",
 }
 
 
@@ -150,9 +169,32 @@ def normalize_abbreviations(text):
     return text
 
 
+def get_stopwords():
+    """
+    Load NLTK English stopwords.
+    If NLTK stopwords are unavailable, use a small fallback list.
+    """
+    try:
+        return set(stopwords.words("english"))
+    except Exception:
+        return {
+            "and", "or", "the", "for", "with", "of", "to", "in", "on",
+            "a", "an", "is", "are", "by", "from"
+        }
+
+
 def clean_text(text):
     """
-    Main NLP preprocessing function.
+    Main NLP preprocessing function using NLTK.
+
+    Steps:
+    1. Convert text to lowercase
+    2. Normalize abbreviations
+    3. Normalize measurements
+    4. Remove symbols
+    5. Tokenize using NLTK
+    6. Remove stopwords
+    7. Return cleaned text
     """
     if pd.isna(text):
         return ""
@@ -168,13 +210,38 @@ def clean_text(text):
     text = re.sub(r"(\d+)\s*v\b", r"\1 volt", text)
     text = re.sub(r"(\d+)\s*a\b", r"\1 ampere", text)
 
-    # Remove symbols
+    # Remove symbols but keep letters, numbers, and spaces
     text = re.sub(r"[^a-z0-9\s]", " ", text)
 
-    # Remove extra spaces
-    text = re.sub(r"\s+", " ", text).strip()
+    # Tokenization using NLTK
+    tokens = wordpunct_tokenize(text)
 
-    return text
+    stop_words = get_stopwords()
+
+    # Keep useful technical words even if they appear in stopword list
+    custom_keep_words = {
+        "mm", "cm", "meter", "volt", "ampere",
+        "steel", "black", "white", "screw",
+        "cable", "board", "power", "switch"
+    }
+
+    cleaned_tokens = []
+
+    for token in tokens:
+        token = token.strip()
+
+        if token == "":
+            continue
+
+        if token in stop_words and token not in custom_keep_words:
+            continue
+
+        if len(token) <= 1 and not token.isdigit():
+            continue
+
+        cleaned_tokens.append(token)
+
+    return " ".join(cleaned_tokens)
 
 
 def get_matched_keywords(text1, text2):
@@ -184,11 +251,7 @@ def get_matched_keywords(text1, text2):
     words1 = set(str(text1).split())
     words2 = set(str(text2).split())
 
-    stop_words = {
-        "and", "or", "the", "for", "with", "of", "to", "in", "on",
-        "a", "an", "item", "material"
-    }
-
+    stop_words = get_stopwords()
     matched = words1.intersection(words2)
 
     matched = [
@@ -336,7 +399,11 @@ def detect_duplicates(
     max_records
 ):
     """
-    Detect duplicate inventory records using TF-IDF + Cosine Similarity.
+    Detect duplicate inventory records using:
+    1. NLTK preprocessing
+    2. TF-IDF vectorization
+    3. Cosine similarity
+    4. Threshold classification
     """
     working_df = df.copy()
 
@@ -404,7 +471,6 @@ def detect_duplicates(
     if result_df.empty:
         return working_df, result_df, result_df
 
-    # Remove repeated pair based on item code combination
     result_df["Pair Key"] = result_df.apply(
         lambda row: tuple(sorted([
             str(row["Item Code 1"]),
@@ -464,7 +530,7 @@ def convert_actual_label(label):
     return 0
 
 
-def convert_predicted_label(score, duplicate_threshold, possible_threshold):
+def convert_predicted_label(score, possible_threshold):
     """
     For evaluation:
     Likely Duplicate and Possible Duplicate are treated as Duplicate.
@@ -475,7 +541,13 @@ def convert_predicted_label(score, duplicate_threshold, possible_threshold):
     return 0
 
 
-def evaluate_labelled_pairs(eval_df, desc1_col, desc2_col, label_col, duplicate_threshold, possible_threshold):
+def evaluate_labelled_pairs(
+    eval_df,
+    desc1_col,
+    desc2_col,
+    label_col,
+    possible_threshold
+):
     """
     Evaluate using labelled item-description pairs.
     """
@@ -487,10 +559,10 @@ def evaluate_labelled_pairs(eval_df, desc1_col, desc2_col, label_col, duplicate_
     eval_df["cleaned_1"] = eval_df[desc1_col].apply(clean_text)
     eval_df["cleaned_2"] = eval_df[desc2_col].apply(clean_text)
 
-    all_descriptions = pd.concat([
-        eval_df["cleaned_1"],
-        eval_df["cleaned_2"]
-    ], ignore_index=True)
+    all_descriptions = pd.concat(
+        [eval_df["cleaned_1"], eval_df["cleaned_2"]],
+        ignore_index=True
+    )
 
     vectorizer = TfidfVectorizer(
         analyzer="word",
@@ -510,8 +582,9 @@ def evaluate_labelled_pairs(eval_df, desc1_col, desc2_col, label_col, duplicate_
 
     eval_df["Similarity (%)"] = [round(score * 100, 2) for score in scores]
     eval_df["Actual Binary"] = eval_df[label_col].apply(convert_actual_label)
+
     eval_df["Predicted Binary"] = [
-        convert_predicted_label(score, duplicate_threshold, possible_threshold)
+        convert_predicted_label(score, possible_threshold)
         for score in scores
     ]
 
@@ -523,7 +596,6 @@ def evaluate_labelled_pairs(eval_df, desc1_col, desc2_col, label_col, duplicate_
     precision = precision_score(eval_df["Actual Binary"], eval_df["Predicted Binary"], zero_division=0)
     recall = recall_score(eval_df["Actual Binary"], eval_df["Predicted Binary"], zero_division=0)
     f1 = f1_score(eval_df["Actual Binary"], eval_df["Predicted Binary"], zero_division=0)
-
     cm = confusion_matrix(eval_df["Actual Binary"], eval_df["Predicted Binary"])
 
     metrics = {
@@ -657,19 +729,16 @@ st.sidebar.markdown("---")
 
 st.sidebar.markdown(
     """
-    ### NLP Components
+    ### NLP Libraries Used
 
-    **Text Preprocessing**  
-    Cleans item descriptions.
+    **NLTK**
+    - Tokenization
+    - Stopword removal
 
-    **Abbreviation Normalization**  
-    Converts short forms such as SS, PCB, BLK.
-
-    **TF-IDF Vectorization**  
-    Converts text into numerical features.
-
-    **Cosine Similarity**  
-    Measures similarity between item descriptions.
+    **Scikit-learn**
+    - TF-IDF vectorization
+    - Cosine similarity
+    - Evaluation metrics
     """
 )
 
@@ -696,7 +765,7 @@ st.markdown(
     <div class="info-box">
     <b>Objective:</b> This application identifies inventory records that may refer to the same item,
     even when their descriptions are written differently. The system compares item descriptions using
-    NLP techniques and highlights records that require manual review.
+    NLTK preprocessing, TF-IDF vectorization, and cosine similarity.
     </div>
     """,
     unsafe_allow_html=True
@@ -761,7 +830,7 @@ with tab_detection:
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Records", len(df))
         c2.metric("Total Columns", len(df.columns))
-        c3.metric("Method", "TF-IDF + Cosine Similarity")
+        c3.metric("Method", "NLTK + TF-IDF + Cosine Similarity")
 
         if len(df) > max_records:
             st.warning(
@@ -805,8 +874,7 @@ with tab_detection:
             """
             <div class="method-box">
             <b>Detection logic:</b> The system compares the selected item description from one row
-            with the selected item description from another row. The item code is only used to identify
-            the records in the result.
+            with another row. The item code is only used to identify the records in the result.
             </div>
             """,
             unsafe_allow_html=True
@@ -947,8 +1015,7 @@ with tab_detection:
 
                 with st.expander("View cleaned text used by NLP model"):
                     st.write(
-                        "This table shows the cleaned descriptions after preprocessing. "
-                        "It is useful for explaining the NLP process in your report."
+                        "This table shows the cleaned descriptions after NLTK preprocessing."
                     )
 
                     if (
@@ -1003,11 +1070,11 @@ with tab_detection:
 
                 st.markdown(
                     """
-                    This application uses a text similarity approach to detect potential duplicate inventory records.
+                    This application uses Natural Language Processing to detect potential duplicate inventory records.
 
                     **Process flow:**
 
-                    1. **Text preprocessing** removes symbols, converts text to lowercase, and cleans spacing.
+                    1. **Text preprocessing using NLTK** tokenizes descriptions and removes stopwords.
                     2. **Abbreviation normalization** converts common short forms into standard words.
                     3. **TF-IDF vectorization** transforms item descriptions into numerical text features.
                     4. **Cosine similarity** compares one item description with another item description.
@@ -1122,7 +1189,6 @@ with tab_evaluation:
                     desc1_col=desc1_col,
                     desc2_col=desc2_col,
                     label_col=label_col,
-                    duplicate_threshold=duplicate_threshold,
                     possible_threshold=possible_threshold
                 )
 
