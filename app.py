@@ -22,6 +22,29 @@ st.set_page_config(
 
 
 # ============================================================
+# SESSION STATE INITIALIZATION
+# ============================================================
+
+if "result_df" not in st.session_state:
+    st.session_state.result_df = pd.DataFrame()
+
+if "technical_result_df" not in st.session_state:
+    st.session_state.technical_result_df = pd.DataFrame()
+
+if "cleaned_df" not in st.session_state:
+    st.session_state.cleaned_df = pd.DataFrame()
+
+if "detection_done" not in st.session_state:
+    st.session_state.detection_done = False
+
+if "selected_code_column" not in st.session_state:
+    st.session_state.selected_code_column = None
+
+if "selected_description_column" not in st.session_state:
+    st.session_state.selected_description_column = None
+
+
+# ============================================================
 # CUSTOM CSS
 # ============================================================
 
@@ -64,11 +87,6 @@ st.markdown(
         border-radius: 12px;
         border: 1px solid #E5E7EB;
         margin-bottom: 18px;
-    }
-
-    .small-text {
-        color: #6B7280;
-        font-size: 14px;
     }
     </style>
     """,
@@ -164,6 +182,7 @@ def get_matched_keywords(text1: str, text2: str) -> str:
     }
 
     matched = words1.intersection(words2)
+
     matched = [
         word for word in matched
         if len(word) > 1 and word not in stop_words
@@ -668,156 +687,192 @@ if df is not None:
                     possible_threshold=possible_threshold
                 )
 
+            st.session_state.cleaned_df = cleaned_df
+            st.session_state.result_df = result_df
+            st.session_state.technical_result_df = technical_result_df
+            st.session_state.detection_done = True
+            st.session_state.selected_code_column = code_column
+            st.session_state.selected_description_column = description_column
+
+    # ========================================================
+    # DISPLAY RESULTS FROM SESSION STATE
+    # This section remains visible even after filtering.
+    # ========================================================
+
+    if st.session_state.detection_done:
+
+        cleaned_df = st.session_state.cleaned_df
+        result_df = st.session_state.result_df
+        technical_result_df = st.session_state.technical_result_df
+
+        saved_code_column = st.session_state.selected_code_column
+        saved_description_column = st.session_state.selected_description_column
+
+        st.markdown(
+            '<div class="section-title">5. Detection Summary</div>',
+            unsafe_allow_html=True
+        )
+
+        if result_df.empty:
+            st.warning("No duplicate or possible duplicate records were found. Try lowering the threshold.")
+
+        else:
+            high_risk = len(result_df[result_df["Risk Level"] == "High"])
+            medium_risk = len(result_df[result_df["Risk Level"] == "Medium"])
+
+            s1, s2, s3 = st.columns(3)
+            s1.metric("High Risk Matches", high_risk)
+            s2.metric("Medium Risk Matches", medium_risk)
+            s3.metric("Total Matches Found", len(result_df))
+
+            summary_df = result_df["Duplicate Status"].value_counts().reset_index()
+            summary_df.columns = ["Duplicate Status", "Count"]
+
+            fig, ax = plt.subplots()
+            ax.bar(summary_df["Duplicate Status"], summary_df["Count"])
+            ax.set_xlabel("Duplicate Status")
+            ax.set_ylabel("Number of Matches")
+            ax.set_title("Duplicate Detection Summary")
+            plt.xticks(rotation=15)
+
+            st.pyplot(fig)
+
             st.markdown(
-                '<div class="section-title">5. Detection Summary</div>',
+                '<div class="section-title">6. Review Potential Duplicate Records</div>',
                 unsafe_allow_html=True
             )
 
-            if result_df.empty:
-                st.warning("No duplicate or possible duplicate records were found. Try lowering the threshold.")
+            st.info(
+                "Review the records below. Start with High Risk matches because they are the most likely duplicates."
+            )
+
+            filter_col1, filter_col2 = st.columns(2)
+
+            with filter_col1:
+                status_filter = st.selectbox(
+                    "Filter by duplicate status",
+                    options=["All"] + sorted(result_df["Duplicate Status"].unique().tolist()),
+                    key="status_filter"
+                )
+
+            with filter_col2:
+                risk_filter = st.selectbox(
+                    "Filter by risk level",
+                    options=["All"] + sorted(result_df["Risk Level"].unique().tolist()),
+                    key="risk_filter"
+                )
+
+            display_df = result_df.copy()
+
+            if status_filter != "All":
+                display_df = display_df[
+                    display_df["Duplicate Status"] == status_filter
+                ]
+
+            if risk_filter != "All":
+                display_df = display_df[
+                    display_df["Risk Level"] == risk_filter
+                ]
+
+            if len(display_df) == 0:
+                st.warning("No records match the selected filter.")
 
             else:
-                high_risk = len(result_df[result_df["Risk Level"] == "High"])
-                medium_risk = len(result_df[result_df["Risk Level"] == "Medium"])
+                max_display = min(500, len(display_df))
 
-                s1, s2, s3 = st.columns(3)
-                s1.metric("High Risk Matches", high_risk)
-                s2.metric("Medium Risk Matches", medium_risk)
-                s3.metric("Total Matches Found", len(result_df))
-
-                summary_df = result_df["Duplicate Status"].value_counts().reset_index()
-                summary_df.columns = ["Duplicate Status", "Count"]
-
-                fig, ax = plt.subplots()
-                ax.bar(summary_df["Duplicate Status"], summary_df["Count"])
-                ax.set_xlabel("Duplicate Status")
-                ax.set_ylabel("Number of Matches")
-                ax.set_title("Duplicate Detection Summary")
-                plt.xticks(rotation=15)
-
-                st.pyplot(fig)
-
-                st.markdown(
-                    '<div class="section-title">6. Review Potential Duplicate Records</div>',
-                    unsafe_allow_html=True
-                )
-
-                st.info(
-                    "Review the records below. Start with High Risk matches because they are the most likely duplicates."
-                )
-
-                filter_col1, filter_col2 = st.columns(2)
-
-                with filter_col1:
-                    status_filter = st.selectbox(
-                        "Filter by duplicate status",
-                        options=["All"] + sorted(result_df["Duplicate Status"].unique().tolist())
-                    )
-
-                with filter_col2:
-                    risk_filter = st.selectbox(
-                        "Filter by risk level",
-                        options=["All"] + sorted(result_df["Risk Level"].unique().tolist())
-                    )
-
-                display_df = result_df.copy()
-
-                if status_filter != "All":
-                    display_df = display_df[
-                        display_df["Duplicate Status"] == status_filter
-                    ]
-
-                if risk_filter != "All":
-                    display_df = display_df[
-                        display_df["Risk Level"] == risk_filter
-                    ]
-
-                if len(display_df) == 0:
-                    st.warning("No records match the selected filter.")
-
+                if max_display < 10:
+                    display_limit = max_display
                 else:
                     display_limit = st.slider(
                         "Number of records to display",
                         min_value=10,
-                        max_value=max(10, min(500, len(display_df))),
-                        value=min(50, len(display_df)),
-                        step=10
+                        max_value=max_display,
+                        value=min(50, max_display),
+                        step=10,
+                        key="display_limit"
                     )
 
+                st.dataframe(
+                    display_df.head(display_limit),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            with st.expander("View cleaned text used by NLP model"):
+                st.write(
+                    "This table shows the cleaned descriptions after preprocessing. "
+                    "It is useful for explaining the NLP process in your report."
+                )
+
+                if (
+                    saved_code_column in cleaned_df.columns
+                    and saved_description_column in cleaned_df.columns
+                    and "Cleaned Description" in cleaned_df.columns
+                ):
                     st.dataframe(
-                        display_df.head(display_limit),
+                        cleaned_df[
+                            [saved_code_column, saved_description_column, "Cleaned Description"]
+                        ].head(100),
                         use_container_width=True,
                         hide_index=True
                     )
+                else:
+                    st.warning("Cleaned text preview is unavailable.")
 
-                with st.expander("View cleaned text used by NLP model"):
-                    st.write(
-                        "This table shows the cleaned descriptions after preprocessing. "
-                        "It is useful for explaining the NLP process in your report."
-                    )
+            with st.expander("View technical similarity results"):
+                st.write("This table shows the technical output used for model explanation.")
 
-                    st.dataframe(
-                        cleaned_df[[code_column, description_column, "Cleaned Description"]].head(100),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                with st.expander("View technical similarity results"):
-                    st.write(
-                        "This table shows the technical output used for model explanation."
-                    )
-
-                    st.dataframe(
-                        technical_result_df.head(100),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                st.markdown(
-                    '<div class="section-title">7. Download Results</div>',
-                    unsafe_allow_html=True
+                st.dataframe(
+                    technical_result_df.head(100),
+                    use_container_width=True,
+                    hide_index=True
                 )
 
-                d1, d2 = st.columns(2)
+            st.markdown(
+                '<div class="section-title">7. Download Results</div>',
+                unsafe_allow_html=True
+            )
 
-                with d1:
-                    st.download_button(
-                        label="📥 Download Review Results CSV",
-                        data=dataframe_to_csv(result_df),
-                        file_name="inventory_duplicate_review_results.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
+            d1, d2 = st.columns(2)
 
-                with d2:
-                    st.download_button(
-                        label="📥 Download Review Results Excel",
-                        data=dataframe_to_excel(result_df),
-                        file_name="inventory_duplicate_review_results.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-
-                st.markdown(
-                    '<div class="section-title">8. NLP Method Explanation</div>',
-                    unsafe_allow_html=True
+            with d1:
+                st.download_button(
+                    label="📥 Download Review Results CSV",
+                    data=dataframe_to_csv(result_df),
+                    file_name="inventory_duplicate_review_results.csv",
+                    mime="text/csv",
+                    use_container_width=True
                 )
 
-                st.markdown(
-                    """
-                    This application uses a text similarity approach to detect potential duplicate inventory records.
-
-                    **Process flow:**
-
-                    1. **Text preprocessing** removes symbols, converts text to lowercase, and cleans spacing.
-                    2. **Abbreviation normalization** converts common short forms into standard words.
-                    3. **TF-IDF vectorization** transforms item descriptions into numerical text features.
-                    4. **Cosine similarity** compares one item description with another item description.
-                    5. **Threshold classification** labels the pair as Likely Duplicate or Possible Duplicate.
-
-                    The item code is not used to calculate similarity. It is only used as a reference to identify the records.
-                    """
+            with d2:
+                st.download_button(
+                    label="📥 Download Review Results Excel",
+                    data=dataframe_to_excel(result_df),
+                    file_name="inventory_duplicate_review_results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
                 )
+
+            st.markdown(
+                '<div class="section-title">8. NLP Method Explanation</div>',
+                unsafe_allow_html=True
+            )
+
+            st.markdown(
+                """
+                This application uses a text similarity approach to detect potential duplicate inventory records.
+
+                **Process flow:**
+
+                1. **Text preprocessing** removes symbols, converts text to lowercase, and cleans spacing.
+                2. **Abbreviation normalization** converts common short forms into standard words.
+                3. **TF-IDF vectorization** transforms item descriptions into numerical text features.
+                4. **Cosine similarity** compares one item description with another item description.
+                5. **Threshold classification** labels the pair as Likely Duplicate or Possible Duplicate.
+
+                The item code is not used to calculate similarity. It is only used as a reference to identify the records.
+                """
+            )
 
 else:
     st.info("Upload a CSV/Excel file or use the sample dataset to begin.")
