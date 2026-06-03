@@ -1,0 +1,36 @@
+item_code,description,category,department,unit
+BOM001,Screw M4 x 10mm stainless steel,Fastener,Hardware,PCS
+BOM002,SS screw M4 10mm,Fastener,Hardware,PCS
+BOM003,Screw M5 x 12mm stainless steel,Fastener,Hardware,PCS
+BOM004,Stainless steel screw M5x12,Fastener,Hardware,PCS
+BOM005,Rubber gasket black 20mm,Seal,Mechanical,PCS
+BOM006,Black rubber seal 20 mm,Seal,Mechanical,PCS
+BOM007,Silicone gasket transparent 30mm,Seal,Mechanical,PCS
+BOM008,Clear silicone seal 30 mm,Seal,Mechanical,PCS
+BOM009,PCB controller board,Electronic Component,Electrical,PCS
+BOM010,Main control PCB board,Electronic Component,Electrical,PCS
+BOM011,Printed circuit board assembly main controller,Electronic Component,Electrical,PCS
+BOM012,Steel bracket L shape,Mechanical Part,Mechanical,PCS
+BOM013,L-shaped steel mounting bracket,Mechanical Part,Mechanical,PCS
+BOM014,Aluminium bracket right side,Mechanical Part,Mechanical,PCS
+BOM015,Right side alum brkt,Mechanical Part,Mechanical,PCS
+BOM016,Black cable 2 meter,Cable,Electrical,PCS
+BOM017,Cable blk 2m,Cable,Electrical,PCS
+BOM018,Red power cable 1 meter,Cable,Electrical,PCS
+BOM019,Power cable red 1m,Cable,Electrical,PCS
+BOM020,Hex nut M4 stainless steel,Fastener,Hardware,PCS
+BOM021,SS hexagon nut M4,Fastener,Hardware,PCS
+BOM022,Flat washer M4 zinc plated,Fastener,Hardware,PCS
+BOM023,Zinc flat washer for M4 screw,Fastener,Hardware,PCS
+BOM024,Ultrasonic sensor module HC-SR04,Sensor,Electrical,PCS
+BOM025,HC SR04 ultrasonic distance sensor,Sensor,Electrical,PCS
+BOM026,DHT22 temperature humidity sensor,Sensor,Electrical,PCS
+BOM027,Temperature and humidity sensor DHT 22,Sensor,Electrical,PCS
+BOM028,Plastic enclosure box 120x80x50mm,Enclosure,Mechanical,PCS
+BOM029,ABS plastic casing 120 x 80 x 50 mm,Enclosure,Mechanical,PCS
+BOM030,Buzzer module 5V active,Electronic Component,Electrical,PCS
+BOM031,Active buzzer 5 volt module,Electronic Component,Electrical,PCS
+BOM032,Water flow sensor YF-S201,Sensor,Electrical,PCS
+BOM033,YF S201 flow meter sensor,Sensor,Electrical,PCS
+BOM034,LCD display 16x2 with I2C module,Display,Electrical,PCS
+BOM035,16 x 2 LCD IIC display module,Display,Electrical,PCS
