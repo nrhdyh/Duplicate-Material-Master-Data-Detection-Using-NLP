@@ -12,6 +12,7 @@ from nltk.tokenize import wordpunct_tokenize
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.neighbors import NearestNeighbors
 
 
 # ============================================================
@@ -172,7 +173,6 @@ def normalize_abbreviations(text):
 def get_stopwords():
     """
     Load NLTK English stopwords.
-    If NLTK stopwords are unavailable, use a small fallback list.
     """
     try:
         return set(stopwords.words("english"))
@@ -188,13 +188,12 @@ def clean_text(text):
     Main NLP preprocessing function using NLTK.
 
     Steps:
-    1. Convert text to lowercase
-    2. Normalize abbreviations
-    3. Normalize measurements
-    4. Remove symbols
-    5. Tokenize using NLTK
-    6. Remove stopwords
-    7. Return cleaned text
+    1. Lowercase
+    2. Abbreviation normalization
+    3. Measurement normalization
+    4. Symbol removal
+    5. Tokenization using NLTK
+    6. Stopword removal
     """
     if pd.isna(text):
         return ""
@@ -202,7 +201,7 @@ def clean_text(text):
     text = str(text).lower()
     text = normalize_abbreviations(text)
 
-    # Normalize common measurement patterns
+    # Normalize measurements
     text = re.sub(r"(\bm\d+)\s*[xX*]\s*(\d+)", r"\1 x \2", text)
     text = re.sub(r"(\d+)\s*mm\b", r"\1 mm", text)
     text = re.sub(r"(\d+)\s*cm\b", r"\1 cm", text)
@@ -210,7 +209,7 @@ def clean_text(text):
     text = re.sub(r"(\d+)\s*v\b", r"\1 volt", text)
     text = re.sub(r"(\d+)\s*a\b", r"\1 ampere", text)
 
-    # Remove symbols but keep letters, numbers, and spaces
+    # Remove symbols
     text = re.sub(r"[^a-z0-9\s]", " ", text)
 
     # Tokenization using NLTK
@@ -218,7 +217,6 @@ def clean_text(text):
 
     stop_words = get_stopwords()
 
-    # Keep useful technical words even if they appear in stopword list
     custom_keep_words = {
         "mm", "cm", "meter", "volt", "ampere",
         "steel", "black", "white", "screw",
@@ -396,14 +394,17 @@ def detect_duplicates(
     description_column,
     duplicate_threshold,
     possible_threshold,
-    max_records
+    max_records,
+    top_matches
 ):
     """
-    Detect duplicate inventory records using:
+    Fast duplicate detection using:
     1. NLTK preprocessing
     2. TF-IDF vectorization
-    3. Cosine similarity
+    3. NearestNeighbors with cosine distance
     4. Threshold classification
+
+    This avoids comparing every row with every other row.
     """
     working_df = df.copy()
 
@@ -422,17 +423,44 @@ def detect_duplicates(
 
     vectorizer = TfidfVectorizer(
         analyzer="word",
-        ngram_range=(1, 2)
+        ngram_range=(1, 2),
+        min_df=1,
+        max_features=8000
     )
 
     tfidf_matrix = vectorizer.fit_transform(working_df["Cleaned Description"])
-    similarity_matrix = cosine_similarity(tfidf_matrix)
+
+    n_neighbors = min(top_matches + 1, len(working_df))
+
+    nearest_model = NearestNeighbors(
+        n_neighbors=n_neighbors,
+        metric="cosine",
+        algorithm="brute"
+    )
+
+    nearest_model.fit(tfidf_matrix)
+
+    distances, indices = nearest_model.kneighbors(tfidf_matrix)
 
     records = []
+    seen_pairs = set()
 
     for i in range(len(working_df)):
-        for j in range(i + 1, len(working_df)):
-            score = float(similarity_matrix[i][j])
+        for neighbor_position in range(1, n_neighbors):
+            j = int(indices[i][neighbor_position])
+            distance = float(distances[i][neighbor_position])
+
+            if i == j:
+                continue
+
+            pair_key = tuple(sorted([i, j]))
+
+            if pair_key in seen_pairs:
+                continue
+
+            seen_pairs.add(pair_key)
+
+            score = 1 - distance
 
             result_label = get_result_label(
                 score,
@@ -471,23 +499,10 @@ def detect_duplicates(
     if result_df.empty:
         return working_df, result_df, result_df
 
-    result_df["Pair Key"] = result_df.apply(
-        lambda row: tuple(sorted([
-            str(row["Item Code 1"]),
-            str(row["Item Code 2"])
-        ])),
-        axis=1
-    )
-
     result_df = result_df.sort_values(
         by="Similarity (%)",
         ascending=False
-    )
-
-    result_df = result_df.drop_duplicates(
-        subset=["Pair Key"],
-        keep="first"
-    ).drop(columns=["Pair Key"]).reset_index(drop=True)
+    ).reset_index(drop=True)
 
     user_result_df = result_df[
         [
@@ -566,7 +581,9 @@ def evaluate_labelled_pairs(
 
     vectorizer = TfidfVectorizer(
         analyzer="word",
-        ngram_range=(1, 2)
+        ngram_range=(1, 2),
+        min_df=1,
+        max_features=8000
     )
 
     vectorizer.fit(all_descriptions)
@@ -719,10 +736,19 @@ possible_threshold = st.sidebar.slider(
 max_records = st.sidebar.slider(
     "Maximum records to process",
     min_value=100,
-    max_value=3000,
+    max_value=5000,
     value=1000,
     step=100,
-    help="Higher values may take longer because every row is compared with other rows."
+    help="Higher values may take longer. Recommended for demo: 500 to 1000."
+)
+
+top_matches = st.sidebar.slider(
+    "Top similar matches per item",
+    min_value=3,
+    max_value=20,
+    value=5,
+    step=1,
+    help="Lower value makes detection faster. Recommended: 5."
 )
 
 st.sidebar.markdown("---")
@@ -737,6 +763,7 @@ st.sidebar.markdown(
 
     **Scikit-learn**
     - TF-IDF vectorization
+    - Nearest Neighbors
     - Cosine similarity
     - Evaluation metrics
     """
@@ -765,7 +792,7 @@ st.markdown(
     <div class="info-box">
     <b>Objective:</b> This application identifies inventory records that may refer to the same item,
     even when their descriptions are written differently. The system compares item descriptions using
-    NLTK preprocessing, TF-IDF vectorization, and cosine similarity.
+    NLTK preprocessing, TF-IDF vectorization, and cosine-based nearest neighbor matching.
     </div>
     """,
     unsafe_allow_html=True
@@ -830,7 +857,7 @@ with tab_detection:
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Records", len(df))
         c2.metric("Total Columns", len(df.columns))
-        c3.metric("Method", "NLTK + TF-IDF + Cosine Similarity")
+        c3.metric("Method", "NLTK + TF-IDF + Nearest Neighbors")
 
         if len(df) > max_records:
             st.warning(
@@ -874,7 +901,7 @@ with tab_detection:
             """
             <div class="method-box">
             <b>Detection logic:</b> The system compares the selected item description from one row
-            with another row. The item code is only used to identify the records in the result.
+            with its nearest similar item descriptions. The item code is only used to identify the records.
             </div>
             """,
             unsafe_allow_html=True
@@ -897,14 +924,15 @@ with tab_detection:
                 st.error("Possible duplicate threshold must be lower than likely duplicate threshold.")
 
             else:
-                with st.spinner("Processing descriptions and calculating similarity..."):
+                with st.spinner("Processing descriptions and finding similar items..."):
                     cleaned_df, result_df, technical_result_df = detect_duplicates(
                         df=df,
                         code_column=code_column,
                         description_column=description_column,
                         duplicate_threshold=duplicate_threshold,
                         possible_threshold=possible_threshold,
-                        max_records=max_records
+                        max_records=max_records,
+                        top_matches=top_matches
                     )
 
                 st.session_state.cleaned_df = cleaned_df
@@ -1077,7 +1105,7 @@ with tab_detection:
                     1. **Text preprocessing using NLTK** tokenizes descriptions and removes stopwords.
                     2. **Abbreviation normalization** converts common short forms into standard words.
                     3. **TF-IDF vectorization** transforms item descriptions into numerical text features.
-                    4. **Cosine similarity** compares one item description with another item description.
+                    4. **Nearest Neighbors with cosine distance** finds the most similar item descriptions efficiently.
                     5. **Threshold classification** labels the pair as Likely Duplicate or Possible Duplicate.
 
                     The item code is not used to calculate similarity. It is only used as a reference to identify the records.
