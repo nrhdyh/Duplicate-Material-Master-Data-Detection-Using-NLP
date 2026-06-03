@@ -11,7 +11,13 @@ from nltk.tokenize import wordpunct_tokenize
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix
+)
 from sklearn.neighbors import NearestNeighbors
 
 
@@ -403,8 +409,6 @@ def detect_duplicates(
     2. TF-IDF vectorization
     3. NearestNeighbors with cosine distance
     4. Threshold classification
-
-    This avoids comparing every row with every other row.
     """
     working_df = df.copy()
 
@@ -537,12 +541,50 @@ def detect_duplicates(
 # ============================================================
 
 def convert_actual_label(label):
+    """
+    Convert actual/manual label into binary format.
+
+    1 = Duplicate
+    0 = Not Duplicate
+    None = empty/invalid label
+    """
     label = str(label).strip().lower()
 
-    if label in ["duplicate", "yes", "1", "true", "same"]:
+    if label in ["", "nan", "none"]:
+        return None
+
+    not_duplicate_labels = [
+        "not duplicate",
+        "different",
+        "no",
+        "not same",
+        "low",
+        "0",
+        "false"
+    ]
+
+    duplicate_labels = [
+        "duplicate",
+        "yes",
+        "same",
+        "similar",
+        "1",
+        "true"
+    ]
+
+    if label in not_duplicate_labels:
+        return 0
+
+    if label in duplicate_labels:
         return 1
 
-    return 0
+    if "not duplicate" in label:
+        return 0
+
+    if "duplicate" in label:
+        return 1
+
+    return None
 
 
 def convert_predicted_label(score, possible_threshold):
@@ -564,7 +606,8 @@ def evaluate_labelled_pairs(
     possible_threshold
 ):
     """
-    Evaluate using labelled item-description pairs.
+    Evaluate using manually labelled item-description pairs.
+    Blank actual_label rows are ignored.
     """
     eval_df = eval_df.copy()
 
@@ -573,6 +616,18 @@ def evaluate_labelled_pairs(
 
     eval_df["cleaned_1"] = eval_df[desc1_col].apply(clean_text)
     eval_df["cleaned_2"] = eval_df[desc2_col].apply(clean_text)
+
+    eval_df["Actual Binary"] = eval_df[label_col].apply(convert_actual_label)
+
+    # Remove rows that are not manually labelled yet
+    eval_df = eval_df.dropna(subset=["Actual Binary"]).reset_index(drop=True)
+
+    if eval_df.empty:
+        raise ValueError(
+            "No valid manual labels found. Please fill actual_label with Duplicate or Not Duplicate."
+        )
+
+    eval_df["Actual Binary"] = eval_df["Actual Binary"].astype(int)
 
     all_descriptions = pd.concat(
         [eval_df["cleaned_1"], eval_df["cleaned_2"]],
@@ -598,7 +653,6 @@ def evaluate_labelled_pairs(
         scores.append(float(score))
 
     eval_df["Similarity (%)"] = [round(score * 100, 2) for score in scores]
-    eval_df["Actual Binary"] = eval_df[label_col].apply(convert_actual_label)
 
     eval_df["Predicted Binary"] = [
         convert_predicted_label(score, possible_threshold)
@@ -613,14 +667,15 @@ def evaluate_labelled_pairs(
     precision = precision_score(eval_df["Actual Binary"], eval_df["Predicted Binary"], zero_division=0)
     recall = recall_score(eval_df["Actual Binary"], eval_df["Predicted Binary"], zero_division=0)
     f1 = f1_score(eval_df["Actual Binary"], eval_df["Predicted Binary"], zero_division=0)
-    cm = confusion_matrix(eval_df["Actual Binary"], eval_df["Predicted Binary"])
+    cm = confusion_matrix(eval_df["Actual Binary"], eval_df["Predicted Binary"], labels=[0, 1])
 
     metrics = {
         "Accuracy": accuracy,
         "Precision": precision,
         "Recall": recall,
         "F1-score": f1,
-        "Confusion Matrix": cm
+        "Confusion Matrix": cm,
+        "Evaluated Rows": len(eval_df)
     }
 
     output_df = eval_df[
@@ -651,6 +706,42 @@ def dataframe_to_excel(df, sheet_name="Results"):
         df.to_excel(writer, index=False, sheet_name=sheet_name)
 
     return output.getvalue()
+
+
+def create_review_template(result_df):
+    """
+    Create a review template for manual labelling.
+    User fills actual_label with Duplicate or Not Duplicate.
+    """
+    review_df = result_df.copy()
+
+    if "actual_label" not in review_df.columns:
+        review_df["actual_label"] = ""
+
+    preferred_columns = [
+        "Item Code 1",
+        "Item Description 1",
+        "Item Code 2",
+        "Item Description 2",
+        "Similarity (%)",
+        "Duplicate Status",
+        "Risk Level",
+        "actual_label",
+        "Recommended Action",
+        "Matched Keywords"
+    ]
+
+    existing_columns = [
+        col for col in preferred_columns
+        if col in review_df.columns
+    ]
+
+    other_columns = [
+        col for col in review_df.columns
+        if col not in existing_columns
+    ]
+
+    return review_df[existing_columns + other_columns]
 
 
 # ============================================================
@@ -1071,22 +1162,30 @@ with tab_detection:
                     unsafe_allow_html=True
                 )
 
+                review_template_df = create_review_template(result_df)
+
+                st.info(
+                    "For evaluation, download the review template and manually fill the "
+                    "`actual_label` column with either `Duplicate` or `Not Duplicate`. "
+                    "Then upload the labelled file in the Model Evaluation tab."
+                )
+
                 d1, d2 = st.columns(2)
 
                 with d1:
                     st.download_button(
-                        label="📥 Download Review Results CSV",
-                        data=dataframe_to_csv(result_df),
-                        file_name="inventory_duplicate_review_results.csv",
+                        label="📥 Download Review Template CSV",
+                        data=dataframe_to_csv(review_template_df),
+                        file_name="inventory_duplicate_review_template.csv",
                         mime="text/csv",
                         use_container_width=True
                     )
 
                 with d2:
                     st.download_button(
-                        label="📥 Download Review Results Excel",
-                        data=dataframe_to_excel(result_df),
-                        file_name="inventory_duplicate_review_results.xlsx",
+                        label="📥 Download Review Template Excel",
+                        data=dataframe_to_excel(review_template_df),
+                        file_name="inventory_duplicate_review_template.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
@@ -1148,7 +1247,7 @@ with tab_evaluation:
     )
 
     st.info(
-        "Use this section for your report. Upload a labelled dataset with two descriptions and the actual label."
+        "Upload the review template from Tab 1 after filling the `actual_label` column manually."
     )
 
     eval_uploaded_file = st.file_uploader(
@@ -1179,9 +1278,24 @@ with tab_evaluation:
 
         eval_columns = eval_df.columns.tolist()
 
-        default_desc1 = "description_1" if "description_1" in eval_columns else eval_columns[0]
-        default_desc2 = "description_2" if "description_2" in eval_columns else eval_columns[min(1, len(eval_columns) - 1)]
-        default_label = "actual_label" if "actual_label" in eval_columns else eval_columns[-1]
+        if "Item Description 1" in eval_columns:
+            default_desc1 = "Item Description 1"
+        elif "description_1" in eval_columns:
+            default_desc1 = "description_1"
+        else:
+            default_desc1 = eval_columns[0]
+
+        if "Item Description 2" in eval_columns:
+            default_desc2 = "Item Description 2"
+        elif "description_2" in eval_columns:
+            default_desc2 = "description_2"
+        else:
+            default_desc2 = eval_columns[min(1, len(eval_columns) - 1)]
+
+        if "actual_label" in eval_columns:
+            default_label = "actual_label"
+        else:
+            default_label = eval_columns[-1]
 
         e1, e2, e3 = st.columns(3)
 
@@ -1209,6 +1323,15 @@ with tab_evaluation:
                 key="label_col"
             )
 
+        st.markdown(
+            """
+            **Manual label guide:**
+            - Use `Duplicate` if both descriptions refer to the same item.
+            - Use `Not Duplicate` if both descriptions refer to different items.
+            - Blank labels will be ignored during evaluation.
+            """
+        )
+
         if st.button("📊 Run Evaluation", type="primary", use_container_width=True):
 
             try:
@@ -1222,12 +1345,13 @@ with tab_evaluation:
 
                 st.markdown("### Evaluation Metrics")
 
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
 
-                m1.metric("Accuracy", f"{metrics['Accuracy']:.2f}")
-                m2.metric("Precision", f"{metrics['Precision']:.2f}")
-                m3.metric("Recall", f"{metrics['Recall']:.2f}")
-                m4.metric("F1-score", f"{metrics['F1-score']:.2f}")
+                m1.metric("Evaluated Rows", metrics["Evaluated Rows"])
+                m2.metric("Accuracy", f"{metrics['Accuracy']:.2f}")
+                m3.metric("Precision", f"{metrics['Precision']:.2f}")
+                m4.metric("Recall", f"{metrics['Recall']:.2f}")
+                m5.metric("F1-score", f"{metrics['F1-score']:.2f}")
 
                 st.markdown("### Confusion Matrix")
 
